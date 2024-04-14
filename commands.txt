@@ -1,0 +1,12 @@
+Client
+javac -cp client.jar ClientMain.java
+java -cp client.jar;. ClientMain 12345 1000
+
+Controller: 
+java Controller cport R timeout rebalance_period
+
+A Dstore: 
+java Dstore port cport timeout file_folder
+
+A client: 
+java Client cport timeout
