@@ -13,6 +13,8 @@ public class Controller {
     private volatile boolean running = true;
     private Map<String, Socket> dstores; // Map to keep track of connected Dstores
     private ConcurrentHashMap<String, String> fileIndex; // Track file states
+    private ConcurrentHashMap<String, Set<String>> storeAcks = new ConcurrentHashMap<>();
+    private Map<String, Socket> clientConnections = new ConcurrentHashMap<>();
 
     public Controller(int port, int replicationFactor, int timeout, int rebalancePeriod) {
         this.port = port;
@@ -36,34 +38,76 @@ public class Controller {
             try {
                 Socket socket = serverSocket.accept();
                 System.out.println("New connection from " + socket.getRemoteSocketAddress());
-                handleConnection(socket);
+                // Handle each connection in a new thread
+                new Thread(() -> handleConnection(socket)).start();
             } catch (IOException e) {
                 System.out.println("Error accepting connection: " + e.getMessage());
             }
         }
     }
+    
 
-    public void handleConnection(Socket socket) throws IOException {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
+    private void handleConnection(Socket socket) {
+        try {
+            BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
+        
+            String message;
+            while ((message = reader.readLine()) != null) {  // Changed to check for null to keep the connection open
+                String[] parts = message.split(" ");
+                if (parts.length == 0) {
+                    continue; // Skip empty messages
+                }
     
-        String initialMessage = reader.readLine();
-        if (initialMessage == null) {
-            System.out.println("Received null initial message from connection: " + socket.getRemoteSocketAddress());
-            socket.close();  // Close the connection if the initial message is null
-            return;
-        }
-    
-        if (initialMessage.startsWith("JOIN")) {
-            handleJoin(socket, initialMessage);
-            // Consider sending an acknowledgment back to the Dstore
-            writer.println("JOIN_ACK");
-        } else {
-            // Handle other types of requests or commands
-            handleClientRequest(socket, reader, writer);
+                switch (parts[0]) {
+                    case "JOIN":
+                        if (parts.length < 2) {
+                            System.out.println("Malformed JOIN message");
+                        } else {
+                            handleJoin(socket, message);
+                            writer.println("JOIN_ACK");
+                        }
+                        break;
+                    case "STORE_ACK":
+                        if (parts.length < 2) {
+                            System.out.println("Malformed STORE_ACK message");
+                        } else {
+                            handleStoreAck(parts[1]);
+                        }
+                        break;
+                    default:
+                        handleClientRequest(socket, parts, writer);
+                        break;
+                }
+            }
+        } catch (IOException e) {
+            System.out.println("Error handling connection: " + e.getMessage());
+        } finally {
+            try {
+                socket.close();  // Close connection when done
+            } catch (IOException e) {
+                System.out.println("Error closing socket: " + e.getMessage());
+            }
         }
     }
     
+    private void handleClientRequest(Socket clientSocket, String[] commandParts, PrintWriter writer) {
+        switch (commandParts[0]) {
+            case "LIST":
+                processListCommand(writer);
+                break;
+            case "STORE":
+                if (commandParts.length < 3) {
+                    writer.println("ERROR_MALFORMED_COMMAND");
+                } else {
+                    handleStoreCommand(commandParts, writer);
+                }
+                break;
+            // Add more cases as needed
+        }
+    }
+    
+
     private void handleJoin(Socket dstoreSocket, String joinMessage) {
         String[] parts = joinMessage.split(" ");
         if (parts.length < 2) {
@@ -78,38 +122,38 @@ public class Controller {
         }
     }
     
-    
+    private void handleStoreAck(String filename) {
+        storeAcks.putIfAbsent(filename, ConcurrentHashMap.newKeySet());
+        Set<String> ackedStores = storeAcks.get(filename);
+        ackedStores.add(filename);
+
+        // Check if we have received enough ACKs
+        if (ackedStores.size() >= replicationFactor) {
+            fileIndex.put(filename, "store complete");
+            storeAcks.remove(filename);  // Cleanup after completing the store process
+            notifyClientStoreComplete(filename);
+        }
+    }
+
+
+    private void notifyClientStoreComplete(String filename) {
+        Socket clientSocket = clientConnections.get(filename);
+        if (clientSocket != null) {
+            try {
+                PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true);
+                writer.println("STORE_COMPLETE");
+            } catch (IOException e) {
+                System.out.println("Failed to notify client for filename: " + filename);
+            }
+        }
+    }
 
     private String getDstoreID(Socket socket) {
         return socket.getRemoteSocketAddress().toString();
     }
 
-
-    
-
-    private void handleClientRequest(Socket clientSocket, BufferedReader reader, PrintWriter writer) throws IOException {
-        String command = reader.readLine();
-        if (command == null) {
-            return;
-        }
-        String[] commandParts = command.split(" ");
-        switch (commandParts[0]) {
-            case "LIST":
-                processListCommand(writer);
-                break;
-            case "STORE":
-                if (commandParts.length < 3) {
-                    writer.println("ERROR_MALFORMED_COMMAND");
-                    return;
-                }
-                handleStoreCommand(commandParts, writer);
-                break;
-            // Add more cases as needed
-        }
-    }
-    
-
     private void processListCommand(PrintWriter writer) {
+        System.out.println("processing LIST");
         if (dstores.size() < replicationFactor) {
             writer.println("ERROR_NOT_ENOUGH_DSTORES");
             return;
@@ -118,13 +162,20 @@ public class Controller {
                 .filter(entry -> entry.getValue().equals("store complete"))
                 .map(Map.Entry::getKey)
                 .collect(Collectors.joining(" "));
-        writer.println(fileList.isEmpty() ? "LIST" : "LIST " + fileList);
+    
+        if (fileList.isEmpty()) {
+            writer.println("LIST");
+            System.out.println("DEBUG: No files to list, all files are either in progress or none exist."); // Debug message
+        } else {
+            writer.println("LIST " + fileList);
+        }
     }
+    
 
     private void handleStoreCommand(String[] commandParts, PrintWriter clientWriter) {
         String filename = commandParts[1];
         int filesize = Integer.parseInt(commandParts[2]);
-    
+        
         if (fileIndex.containsKey(filename) && fileIndex.get(filename).equals("store complete")) {
             clientWriter.println("ERROR_FILE_ALREADY_EXISTS");
             return;
@@ -146,19 +197,6 @@ public class Controller {
         // Logic to select R available Dstores
         return dstores.keySet().stream().limit(replicationFactor).collect(Collectors.toList());
     }
-
-    private void handleStoreAck(String filename) {
-        // Maintain a count of ACKs received and check if it matches the replication factor
-        // If yes, update index and notify client
-        updateIndexAndNotifyClient(filename);
-    }
-    
-    private void updateIndexAndNotifyClient(String filename) {
-        fileIndex.put(filename, "store complete");
-        // Logic to notify client
-        clientWriter.println("STORE_COMPLETE");
-    }
-    
     
     private void rebalance() {
         // Implement rebalancing logic here, to be run periodically

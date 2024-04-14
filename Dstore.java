@@ -3,14 +3,14 @@ import java.net.*;
 import java.nio.file.*;
 import java.util.Comparator;
 
-
 public class Dstore {
+    private ServerSocket serverSocket;
     private int port;
-    private Socket socket;
-    private PrintWriter out;
-    private BufferedReader in;
-    private int controllerPort;
+    private Socket controllerSocket;
+    private PrintWriter controllerOut;
+    private BufferedReader controllerIn;
     private String controllerHost;
+    private int controllerPort;
     private boolean running = true;
     private String fileFolder;
     private int timeout; // Timeout in milliseconds
@@ -26,6 +26,72 @@ public class Dstore {
     public void start() throws IOException {
         clearLocalData();
         connectToController();
+        serverSocket = new ServerSocket(port);  // Listen for client connections
+        System.out.println("Dstore listening on port: " + port);
+
+        new Thread(this::acceptClientConnections).start();  // Handle client connections
+    }
+
+    private void acceptClientConnections() {
+        while (running) {
+            try {
+                Socket clientSocket = serverSocket.accept();
+                handleClientConnection(clientSocket);
+            } catch (IOException e) {
+                System.out.println("Error accepting client connection: " + e.getMessage());
+            }
+        }
+    }
+
+    private void handleClientConnection(Socket clientSocket) {
+        try {
+            // Stream for reading text data such as commands
+            BufferedReader reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+            PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true);
+            
+            // Read the STORE command header
+            String header = reader.readLine();
+            if (header == null) return;
+    
+            String[] parts = header.split(" ");
+            if (parts.length != 3 || !parts[0].equals("STORE")) {
+                writer.println("ERROR_MALFORMED_COMMAND");
+                return;
+            }
+    
+            String filename = parts[1];
+            int filesize = Integer.parseInt(parts[2]);
+            File file = new File(fileFolder, filename);
+    
+            // Send ACK to Client to start sending the file content
+            writer.println("ACK");
+    
+            // Switch to a different stream to read binary data directly from the socket's InputStream
+            InputStream fileStream = clientSocket.getInputStream();
+            try (FileOutputStream fileOut = new FileOutputStream(file)) {
+                byte[] buffer = new byte[1024];
+                int count;
+                int remaining = filesize;
+                while (remaining > 0 && (count = fileStream.read(buffer, 0, Math.min(buffer.length, remaining))) != -1) {
+                    fileOut.write(buffer, 0, count);
+                    remaining -= count;
+                }
+            }
+    
+            // Notify Controller that the file has been stored
+            notifyControllerStoreAck(filename);
+    
+        } catch (IOException e) {
+            System.out.println("Error handling client store operation: " + e.getMessage());
+        }
+    }
+    
+
+    private void notifyControllerStoreAck(String filename) {
+        if (controllerOut != null) {
+            
+            controllerOut.println("STORE_ACK " + filename);
+        }
     }
 
     private void clearLocalData() {
@@ -34,95 +100,33 @@ public class Dstore {
                 .sorted(Comparator.reverseOrder())
                 .map(Path::toFile)
                 .forEach(File::delete);
-            new File(fileFolder).mkdirs(); // Recreate directory structure if deleted
+            new File(fileFolder).mkdirs();
         } catch (IOException e) {
             System.out.println("Failed to clear local data: " + e.getMessage());
         }
     }
 
     private void connectToController() throws IOException {
-        socket = new Socket();
-        socket.connect(new InetSocketAddress(controllerHost, controllerPort), timeout);
-        out = new PrintWriter(socket.getOutputStream(), true);
-        in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-    
+        controllerSocket = new Socket();
+        controllerSocket.connect(new InetSocketAddress(controllerHost, controllerPort), timeout);
+        controllerOut = new PrintWriter(controllerSocket.getOutputStream(), true);
+        controllerIn = new BufferedReader(new InputStreamReader(controllerSocket.getInputStream()));
+
         System.out.println("Connected to Controller at " + controllerHost + ":" + controllerPort);
-    
-        // Send JOIN message immediately after connection
-        out.println("JOIN " + port);
-        
-        // Start listening to the controller
-        new Thread(this::listenToController).start();
+        controllerOut.println("JOIN " + port);
     }
-    
 
-    private void listenToController() {
+    public void stop() {
+        running = false;
         try {
-            // Initially set a timeout if necessary
-            socket.setSoTimeout(timeout);
-            String message;
-            while ((message = in.readLine()) != null && running) {
-                System.out.println("Message from Controller: " + message);
-                processMessage(message);
-                // Reset timeout after JOIN_ACK or change state to reduce sensitivity to immediate messages
-                if (message.equals("JOIN_ACK")) {
-                    // Option: Remove or increase the timeout after successful join
-                    socket.setSoTimeout(0); // This sets the timeout to infinity
-                }
+            if (serverSocket != null) {
+                serverSocket.close();
             }
-        } catch (SocketTimeoutException e) {
-            System.out.println("Timeout while waiting for a message from the Controller.");
-        } catch (IOException e) {
-            System.out.println("Lost connection to the Controller: " + e.getMessage());
-        } finally {
-            disconnect();
-        }
-    }
-    
-
-    private void processMessage(String message) {
-        // Handle different types of messages here
-        switch (message.split(" ")[0]) {
-            case "STORE":
-                handleStore(message);
-                break;
-            case "REMOVE":
-                handleRemove(message);
-                break;
-            // Add more cases as needed
-        }
-    }
-
-    private void handleClientStore(String[] commandParts) {
-        String filename = commandParts[1];
-        int filesize = Integer.parseInt(commandParts[2]);
-        // Implement file receiving logic here
-        // After receiving, send ACK to client
-        clientWriter.println("ACK");
-        // After storing the file content
-        notifyControllerStoreAck(filename);
-    }
-    
-    private void notifyControllerStoreAck(String filename) {
-        // Notify the controller of successful storage
-        // Assuming there is a way to communicate back to the controller
-        controllerOut.println("STORE_ACK " + filename);
-    }
-    
-
-    private void handleRemove(String message) {
-        // Implementation for removing a file
-    }
-
-    public void disconnect() {
-        try {
-            running = false;
-            if (socket != null) {
-                socket.close();
+            if (controllerSocket != null) {
+                controllerSocket.close();
             }
-            System.out.println("Disconnected from the Controller.");
         } catch (IOException e) {
-            System.out.println("Error while closing the connection: " + e.getMessage());
+            System.out.println("Error while closing the connections: " + e.getMessage());
         }
     }
 
@@ -131,21 +135,17 @@ public class Dstore {
             System.out.println("Usage: java Dstore <port> <controllerPort> <timeout> <fileFolder>");
             return;
         }
-        int port = Integer.parseInt(args[0]); // Port for this Dstore
-        String controllerPort = args[1]; // Controller's port
-        int timeout = Integer.parseInt(args[2]); // Timeout in milliseconds
-        String fileFolder = args[3]; // Local folder for storing data
-    
+        int port = Integer.parseInt(args[0]);
+        String controllerHost = "localhost";
+        int controllerPort = Integer.parseInt(args[1]);
+        int timeout = Integer.parseInt(args[2]);
+        String fileFolder = args[3];
+
         try {
-            // Parse the controllerPort as integer
-            int cport = Integer.parseInt(controllerPort);
-            Dstore dstore = new Dstore(port, "localhost", cport, timeout, fileFolder);
+            Dstore dstore = new Dstore(port, controllerHost, controllerPort, timeout, fileFolder);
             dstore.start();
-        } catch (NumberFormatException e) {
-            System.out.println("Invalid port number format.");
         } catch (IOException e) {
             System.out.println("Failed to start Dstore: " + e.getMessage());
         }
     }
-    
 }

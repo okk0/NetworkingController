@@ -32,6 +32,14 @@ run-dstore:
 run-dstore2:
 	$(JAVA) $(DSTORE) 12347 12345 1000 "data2"
 
+run-dstore3:
+	$(JAVA) $(DSTORE) 12348 12345 1000 "data3"
+
+# Run all Dstores simultaneously on Windows
+run-all-dstores:
+	cmd /c start cmd /c "$(JAVA) $(DSTORE) 12346 12345 1000 'data' > logs\dstore1.log 2>&1"
+	cmd /c start cmd /c "$(JAVA) $(DSTORE) 12347 12345 1000 'data2' > logs\dstore2.log 2>&1"
+	cmd /c start cmd /c "$(JAVA) $(DSTORE) 12348 12345 1000 'data3' > logs\dstore3.log 2>&1"
 
 # Clean up
 clean:
