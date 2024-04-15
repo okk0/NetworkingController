@@ -75,7 +75,7 @@ public class Dstore {
             File file = new File(fileFolder, filename);
             writer.println("ACK");  // Send ACK to client to start sending the file content
             System.out.println("Sent ACK to client.");
-    
+            System.out.println(fileFolder);
             // Prepare to receive the file data
             byte[] buffer = new byte[4096];
             int bytesRead;
@@ -114,7 +114,7 @@ public class Dstore {
 
     private void notifyControllerStoreAck(String filename) {
         if (controllerOut != null) {
-
+            System.out.println("STORE_ACK");
             controllerOut.println("STORE_ACK " + filename);
         }
     }
@@ -123,17 +123,23 @@ public class Dstore {
         try {
             Path directory = Paths.get(fileFolder);
             if (!Files.exists(directory)) {
-                Files.createDirectories(directory); // Ensure directory is created if it doesn't exist
+                System.out.println("Directory does not exist, expected to exist: " + directory);
+                return; // Optionally throw an exception or handle this case as needed
             }
+    
+            // Use Files.walk to iterate through all files and subdirectories, but skip the top-level directory
             Files.walk(directory)
-                 .sorted(Comparator.reverseOrder())
+                 .sorted(Comparator.reverseOrder()) // Important for deleting directories after their contents
                  .map(Path::toFile)
+                 .filter(file -> !file.equals(directory.toFile())) // Skip the root directory itself
                  .forEach(File::delete);
-            System.out.println("Cleared local data successfully.");
+    
+            System.out.println("Cleared local data in existing directory successfully.");
         } catch (IOException e) {
             System.out.println("Failed to clear local data: " + e.getMessage());
         }
     }
+    
     
 
     private void connectToController() throws IOException {

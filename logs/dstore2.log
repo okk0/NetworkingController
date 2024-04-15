@@ -1,17 +1,13 @@
-Cleared local data successfully.
+Cleared local data in existing directory successfully.
 Sent JOIN message with port: 12347
 Dstore listening on port: 12347
-Accepted client connection from: /127.0.0.1:58255
-Connection established with client: /127.0.0.1:58255
+Accepted client connection from: /127.0.0.1:60504
+Connection established with client: /127.0.0.1:60504
 Received command: STORE file1.txt 13
 Preparing to store file: file1.txt with size: 13
 Sent ACK to client.
-Error handling client store operation: 'data2'\file1.txt (The system cannot find the path specified)
-Closed client connection.
-Accepted client connection from: /127.0.0.1:58258
-Connection established with client: /127.0.0.1:58258
-Received command: STORE file1.txt 13
-Preparing to store file: file1.txt with size: 13
-Sent ACK to client.
-Error handling client store operation: 'data2'\file1.txt (The system cannot find the path specified)
+data2
+Received 13 bytes so far.
+STORE_ACK
+File stored successfully: file1.txt
 Closed client connection.

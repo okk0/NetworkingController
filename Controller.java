@@ -51,9 +51,14 @@ public class Controller {
         try {
             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
-        
+    
             String message;
-            while ((message = reader.readLine()) != null) {  // Changed to check for null to keep the connection open
+            while (running && !socket.isClosed()) {  // Ensure the server is still running and socket isn't closed
+                message = reader.readLine();
+                if (message == null) {
+                    // If the client closes the connection, stop the loop
+                    break;
+                }
                 String[] parts = message.split(" ");
                 if (parts.length == 0) {
                     continue; // Skip empty messages
@@ -66,15 +71,18 @@ public class Controller {
                         } else {
                             handleJoin(socket, message);
                             writer.println("JOIN_ACK");
+                            System.out.println("JOIN_ACK");
                         }
                         break;
                     case "STORE_ACK":
+                        System.out.println("STORE_ACK received");
                         if (parts.length < 2) {
                             System.out.println("Malformed STORE_ACK message");
                         } else {
-                            handleStoreAck(parts[1]);
+                            handleStoreAck(parts[1], socket);
                         }
                         break;
+    
                     default:
                         handleClientRequest(socket, parts, writer);
                         break;
@@ -83,13 +91,16 @@ public class Controller {
         } catch (IOException e) {
             System.out.println("Error handling connection: " + e.getMessage());
         } finally {
-            try {
-                socket.close();  // Close connection when done
-            } catch (IOException e) {
-                System.out.println("Error closing socket: " + e.getMessage());
+            if (!socket.isClosed()) {
+                try {
+                    socket.close();  // Only close the socket if it's not already closed
+                } catch (IOException e) {
+                    System.out.println("Error closing socket: " + e.getMessage());
+                }
             }
         }
     }
+    
     
     private void handleClientRequest(Socket clientSocket, String[] commandParts, PrintWriter writer) {
         switch (commandParts[0]) {
@@ -100,12 +111,15 @@ public class Controller {
                 if (commandParts.length < 3) {
                     writer.println("ERROR_MALFORMED_COMMAND");
                 } else {
-                    handleStoreCommand(commandParts, writer);
+                    // Before handling the store, register the client socket
+                    clientConnections.put(commandParts[1], clientSocket); // Save the client connection
+                    handleStoreCommand(commandParts, writer, clientSocket); // Pass clientSocket for further use
                 }
                 break;
             // Add more cases as needed
         }
     }
+    
     
 
     private void handleJoin(Socket dstoreSocket, String joinMessage) {
@@ -122,25 +136,32 @@ public class Controller {
     }
     
     
-    private void handleStoreAck(String filename) {
+    private void handleStoreAck(String filename, Socket socket) {
+        String dstoreId = socket.getRemoteSocketAddress().toString(); // Unique identifier based on socket address
+        System.out.println("Received STORE_ACK for " + filename + " from Dstore " + dstoreId);
         storeAcks.putIfAbsent(filename, ConcurrentHashMap.newKeySet());
         Set<String> ackedStores = storeAcks.get(filename);
-        ackedStores.add(filename);
-
+        ackedStores.add(dstoreId);
+        System.out.println(ackedStores);
+        System.out.println("rep factor:" + replicationFactor);
         // Check if we have received enough ACKs
         if (ackedStores.size() >= replicationFactor) {
             fileIndex.put(filename, "store complete");
-            storeAcks.remove(filename);  // Cleanup after completing the store process
+            storeAcks.remove(filename); // Cleanup after completing the store process
             notifyClientStoreComplete(filename);
         }
     }
+    
+    
 
 
     private void notifyClientStoreComplete(String filename) {
+        System.out.println("notifyCli");
         Socket clientSocket = clientConnections.get(filename);
         if (clientSocket != null) {
             try {
                 PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true);
+                System.out.println("STORE_COMPLETE");
                 writer.println("STORE_COMPLETE");
             } catch (IOException e) {
                 System.out.println("Failed to notify client for filename: " + filename);
@@ -172,25 +193,26 @@ public class Controller {
     }
     
 
-    private void handleStoreCommand(String[] commandParts, PrintWriter clientWriter) {
+    private void handleStoreCommand(String[] commandParts, PrintWriter clientWriter, Socket clientSocket) {
         System.out.println("STORE");
         String filename = commandParts[1];
         if (fileIndex.containsKey(filename) && fileIndex.get(filename).equals("store complete")) {
             clientWriter.println("ERROR_FILE_ALREADY_EXISTS");
             return;
         }
-
+    
         fileIndex.put(filename, "store in progress");
         List<String> selectedDstorePorts = selectDstoresForStorage();
         if (selectedDstorePorts.size() < replicationFactor) {
             clientWriter.println("ERROR_NOT_ENOUGH_DSTORES");
             return;
         }
-
+    
         String response = "STORE_TO " + String.join(" ", selectedDstorePorts);
         clientWriter.println(response);
         System.out.println("Sending STORE_TO command with ports: " + response);
     }
+    
     
     private List<String> selectDstoresForStorage() {
         return dstores.values().stream()
