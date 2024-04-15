@@ -85,6 +85,7 @@ public class Controller {
     
                     default:
                         handleClientRequest(socket, parts, writer);
+                        // Before handling the store, register the client socket
                         break;
                 }
             }
@@ -103,6 +104,7 @@ public class Controller {
     
     
     private void handleClientRequest(Socket clientSocket, String[] commandParts, PrintWriter writer) {
+        clientConnections.put(commandParts[1], clientSocket); // Save the client connection
         switch (commandParts[0]) {
             case "LIST":
                 processListCommand(writer);
@@ -110,17 +112,21 @@ public class Controller {
             case "STORE":
                 if (commandParts.length < 3) {
                     writer.println("ERROR_MALFORMED_COMMAND");
-                } else {
-                    // Before handling the store, register the client socket
-                    clientConnections.put(commandParts[1], clientSocket); // Save the client connection
+                } else { 
                     handleStoreCommand(commandParts, writer, clientSocket); // Pass clientSocket for further use
                 }
                 break;
-            // Add more cases as needed
+            case "LOAD":
+                if (commandParts.length < 2) {
+                        writer.println("ERROR_MALFORMED_COMMAND");
+                } else { 
+                    processLoadCommand(commandParts, writer);
+                }
+                break;
         }
     }
     
-    
+    ///////////////////////////////// JOIN //////////////////////////////////////////////////////////////////////////////////////////////////
 
     private void handleJoin(Socket dstoreSocket, String joinMessage) {
         String[] parts = joinMessage.split(" ");
@@ -135,39 +141,6 @@ public class Controller {
         System.out.println("Dstore joined from port " + listeningPort + " with ID: " + dstoreID);
     }
     
-    
-    private void handleStoreAck(String filename, Socket socket) {
-        String dstoreId = socket.getRemoteSocketAddress().toString(); // Unique identifier based on socket address
-        System.out.println("Received STORE_ACK for " + filename + " from Dstore " + dstoreId);
-        storeAcks.putIfAbsent(filename, ConcurrentHashMap.newKeySet());
-        Set<String> ackedStores = storeAcks.get(filename);
-        ackedStores.add(dstoreId);
-        System.out.println(ackedStores);
-        System.out.println("rep factor:" + replicationFactor);
-        // Check if we have received enough ACKs
-        if (ackedStores.size() >= replicationFactor) {
-            fileIndex.put(filename, "store complete");
-            storeAcks.remove(filename); // Cleanup after completing the store process
-            notifyClientStoreComplete(filename);
-        }
-    }
-    
-    
-
-
-    private void notifyClientStoreComplete(String filename) {
-        System.out.println("notifyCli");
-        Socket clientSocket = clientConnections.get(filename);
-        if (clientSocket != null) {
-            try {
-                PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true);
-                System.out.println("STORE_COMPLETE");
-                writer.println("STORE_COMPLETE");
-            } catch (IOException e) {
-                System.out.println("Failed to notify client for filename: " + filename);
-            }
-        }
-    }
 
     private String getDstoreID(Socket socket) {
         return socket.getRemoteSocketAddress().toString();
@@ -191,8 +164,38 @@ public class Controller {
             writer.println("LIST " + fileList);
         }
     }
-    
+    ////////////////////////////////// STORE /////////////////////////////////////////////////////////////////////////////////
 
+    private void handleStoreAck(String filename, Socket socket) {
+        String dstoreId = socket.getRemoteSocketAddress().toString(); // Unique identifier based on socket address
+        System.out.println("Received STORE_ACK for " + filename + " from Dstore " + dstoreId);
+        storeAcks.putIfAbsent(filename, ConcurrentHashMap.newKeySet());
+        Set<String> ackedStores = storeAcks.get(filename);
+        ackedStores.add(dstoreId);
+        System.out.println(ackedStores);
+        System.out.println("rep factor:" + replicationFactor);
+        // Check if we have received enough ACKs
+        if (ackedStores.size() >= replicationFactor) {
+            fileIndex.put(filename, "store complete");
+            storeAcks.remove(filename); // Cleanup after completing the store process
+            notifyClientStoreComplete(filename);
+        }
+    }
+ 
+    private void notifyClientStoreComplete(String filename) {
+        System.out.println("notifyCli");
+        Socket clientSocket = clientConnections.get(filename);
+        if (clientSocket != null) {
+            try {
+                PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true);
+                System.out.println("STORE_COMPLETE");
+                writer.println("STORE_COMPLETE");
+            } catch (IOException e) {
+                System.out.println("Failed to notify client for filename: " + filename);
+            }
+        }
+    }
+    
     private void handleStoreCommand(String[] commandParts, PrintWriter clientWriter, Socket clientSocket) {
         System.out.println("STORE");
         String filename = commandParts[1];
@@ -221,7 +224,49 @@ public class Controller {
                      .map(String::valueOf)  // Convert integer port to string if necessary
                      .collect(Collectors.toList());
     }
+
+    /////////////////////////////////////// LOAD ///////////////////////////////////////////////////////
     
+    private void processLoadCommand(String[] commandParts, PrintWriter writer) {
+        if (commandParts.length < 2) {
+            writer.println("ERROR_MALFORMED_COMMAND");
+            return;
+        }
+        
+        String filename = commandParts[1];
+        if (!fileIndex.containsKey(filename) || !fileIndex.get(filename).equals("store complete")) {
+            writer.println("ERROR_FILE_DOES_NOT_EXIST");
+            return;
+        }
+        
+        List<String> availableDstores = selectDstoresForFile(filename);
+        if (availableDstores.isEmpty() || availableDstores.size() < replicationFactor) {
+            writer.println("ERROR_NOT_ENOUGH_DSTORES");
+            return;
+        }
+        
+        // Select a random Dstore to load the file from
+        String chosenDstore = availableDstores.get(new Random().nextInt(availableDstores.size()));
+        DstoreInfo dstoreInfo = dstores.get(chosenDstore);
+        
+        // Assume we have a method to get file size, pseudo-implementation
+        long fileSize = getFileSize(filename);
+        writer.println("LOAD_FROM " + dstoreInfo.getPort() + " " + fileSize);
+    }
+    
+    private List<String> selectDstoresForFile(String filename) {
+        return storeAcks.getOrDefault(filename, Collections.emptySet()).stream()
+            .filter(dstoreId -> dstores.containsKey(dstoreId))
+            .collect(Collectors.toList());
+    }
+    
+    private long getFileSize(String filename) {
+        // Implement this based on how your system stores and retrieves file size data
+        return 1024; // Example placeholder
+    }
+
+///////////////////////////////////////// REBALANCE /////////////////////////////////////////////////////////////////////////////
+
     private void rebalance() {
         // Implement rebalancing logic here, to be run periodically
     }

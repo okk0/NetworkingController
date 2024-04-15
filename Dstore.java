@@ -119,6 +119,8 @@ public class Dstore {
         }
     }
 
+    
+
     private void clearLocalData() {
         try {
             Path directory = Paths.get(fileFolder);
