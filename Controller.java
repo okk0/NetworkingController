@@ -11,7 +11,7 @@ public class Controller {
     private int rebalancePeriod; // Rebalance period in seconds
     private ServerSocket serverSocket;
     private volatile boolean running = true;
-    private Map<String, Socket> dstores; // Map to keep track of connected Dstores
+    private Map<String, DstoreInfo> dstores = new ConcurrentHashMap<>();
     private ConcurrentHashMap<String, String> fileIndex; // Track file states
     private ConcurrentHashMap<String, Set<String>> storeAcks = new ConcurrentHashMap<>();
     private Map<String, Socket> clientConnections = new ConcurrentHashMap<>();
@@ -114,13 +114,13 @@ public class Controller {
             System.out.println("Invalid JOIN message: " + joinMessage);
             return;
         }
-        String port = parts[1];
+        int listeningPort = Integer.parseInt(parts[1]);  // Convert port string to integer
         String dstoreID = getDstoreID(dstoreSocket);
-        synchronized (dstores) {
-            dstores.put(dstoreID, dstoreSocket);
-            System.out.println("Dstore joined from port " + port + " with ID: " + dstoreID);
-        }
+    
+        dstores.put(dstoreID, new DstoreInfo(dstoreSocket, listeningPort));
+        System.out.println("Dstore joined from port " + listeningPort + " with ID: " + dstoreID);
     }
+    
     
     private void handleStoreAck(String filename) {
         storeAcks.putIfAbsent(filename, ConcurrentHashMap.newKeySet());
@@ -173,29 +173,31 @@ public class Controller {
     
 
     private void handleStoreCommand(String[] commandParts, PrintWriter clientWriter) {
+        System.out.println("STORE");
         String filename = commandParts[1];
-        int filesize = Integer.parseInt(commandParts[2]);
-        
         if (fileIndex.containsKey(filename) && fileIndex.get(filename).equals("store complete")) {
             clientWriter.println("ERROR_FILE_ALREADY_EXISTS");
             return;
         }
-    
+
         fileIndex.put(filename, "store in progress");
-        List<String> selectedDstores = selectDstoresForStorage();
-    
-        if (selectedDstores.size() < replicationFactor) {
+        List<String> selectedDstorePorts = selectDstoresForStorage();
+        if (selectedDstorePorts.size() < replicationFactor) {
             clientWriter.println("ERROR_NOT_ENOUGH_DSTORES");
             return;
         }
-    
-        String response = "STORE_TO " + String.join(" ", selectedDstores);
+
+        String response = "STORE_TO " + String.join(" ", selectedDstorePorts);
         clientWriter.println(response);
+        System.out.println("Sending STORE_TO command with ports: " + response);
     }
     
     private List<String> selectDstoresForStorage() {
-        // Logic to select R available Dstores
-        return dstores.keySet().stream().limit(replicationFactor).collect(Collectors.toList());
+        return dstores.values().stream()
+                     .limit(replicationFactor)
+                     .map(DstoreInfo::getPort)
+                     .map(String::valueOf)  // Convert integer port to string if necessary
+                     .collect(Collectors.toList());
     }
     
     private void rebalance() {
