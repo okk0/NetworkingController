@@ -1,0 +1,144 @@
+Connection established to port 12345
+Message sent to port 12345: LIST
+List operation started
+Message received from port 12345: LIST
+List operation successfully completed
+Message sent to port 12345: STORE file1.txt 13
+Store operation started for file file1.txt
+Message received from port 12345: STORE_TO 12347 12346 12348
+Controller replied to store file1.txt in these Dstores: 12347 12346 12348 
+Connection established to port 12347
+Message sent to port 12347: STORE file1.txt 13
+Storing file file1.txt to Dstore 12347
+Message received from port 12347: ACK
+ACK received from Dstore 12347 to store file file1.txt
+Store of file file1.txt to Dstore 12347 successfully completed
+Connection established to port 12346
+Message sent to port 12346: STORE file1.txt 13
+Storing file file1.txt to Dstore 12346
+Message received from port 12346: ACK
+ACK received from Dstore 12346 to store file file1.txt
+Store of file file1.txt to Dstore 12346 successfully completed
+Connection established to port 12348
+Message sent to port 12348: STORE file1.txt 13
+Storing file file1.txt to Dstore 12348
+Message received from port 12348: ACK
+ACK received from Dstore 12348 to store file file1.txt
+Store of file file1.txt to Dstore 12348 successfully completed
+Timeout expired while reading from port 12345
+Message sent to port 12345: STORE file1.txt 13
+Store operation started for file file1.txt
+Message received from port 12345: ERROR_FILE_ALREADY_EXISTS
+File to store file1.txt already exists in the data store
+Message sent to port 12345: LIST
+List operation started
+Message received from port 12345: LIST file1.txt
+List operation successfully completed
+Message sent to port 12345: LOAD file1.txt
+Load operation for file file1.txt started
+Message received from port 12345: ERROR_NOT_ENOUGH_DSTORES
+ERROR: Not enough Dstores have joined the data store yet
+Message sent to port 12345: REMOVE file1.txt
+Remove operation for file file1.txt started
+Message received from port 12345: ERROR_UNKNOWN_COMMAND
+ERROR: Unexpected message received. Expected message: REMOVE_COMPLETE
+Remove operation for file file1.txt not completed successfully
+Message sent to port 12345: REMOVE file1.txt
+Remove operation for file file1.txt started
+Message received from port 12345: ERROR_UNKNOWN_COMMAND
+ERROR: Unexpected message received. Expected message: REMOVE_COMPLETE
+Remove operation for file file1.txt not completed successfully
+Message sent to port 12345: LIST
+List operation started
+Message received from port 12345: LIST file1.txt
+List operation successfully completed
+Connection established to port 12345
+Connection established to port 12345
+Connection established to port 12345
+Connection established to port 12345
+Connection established to port 12345
+Connection established to port 12345
+Connection established to port 12345
+Connection established to port 12345
+Connection established to port 12345
+Connection established to port 12345
+Message sent to port 12345: LIST
+List operation started
+Message sent to port 12345: LIST
+Message sent to port 12345: LIST
+List operation started
+Message sent to port 12345: LIST
+List operation started
+Message sent to port 12345: LIST
+Message sent to port 12345: LIST
+Message sent to port 12345: LIST
+Message sent to port 12345: LIST
+Message sent to port 12345: LIST
+Message received from port 12345: LIST file1.txt
+Message sent to port 12345: LIST
+List operation started
+Message received from port 12345: LIST file1.txt
+Message received from port 12345: LIST file1.txt
+List operation started
+List operation started
+Message received from port 12345: LIST file1.txt
+List operation started
+List operation started
+List operation started
+List operation successfully completed
+List operation started
+Message received from port 12345: LIST file1.txt
+Message received from port 12345: LIST file1.txt
+List operation successfully completed
+List operation successfully completed
+Message received from port 12345: LIST file1.txt
+List operation successfully completed
+Message received from port 12345: LIST file1.txt
+Message received from port 12345: LIST file1.txt
+Message received from port 12345: LIST file1.txt
+List operation successfully completed
+List operation successfully completed
+List operation successfully completed
+List operation successfully completed
+List operation successfully completed
+List operation successfully completed
+Message sent to port 12345: LIST
+Message sent to port 12345: LIST
+Message sent to port 12345: LIST
+Message sent to port 12345: LIST
+List operation started
+Message received from port 12345: LIST file1.txt
+Message sent to port 12345: LIST
+List operation started
+Message sent to port 12345: LIST
+Message sent to port 12345: LIST
+List operation started
+List operation started
+Message sent to port 12345: LIST
+List operation successfully completed
+Message sent to port 12345: LIST
+List operation started
+Message received from port 12345: LIST file1.txt
+Message received from port 12345: LIST file1.txt
+List operation started
+List operation started
+Message received from port 12345: LIST file1.txt
+Message received from port 12345: LIST file1.txt
+List operation started
+List operation started
+Message sent to port 12345: LIST
+List operation successfully completed
+List operation successfully completed
+Message received from port 12345: LIST file1.txt
+Message received from port 12345: LIST file1.txt
+List operation successfully completed
+List operation successfully completed
+Message received from port 12345: LIST file1.txt
+Message received from port 12345: LIST file1.txt
+List operation started
+List operation successfully completed
+List operation successfully completed
+List operation successfully completed
+List operation successfully completed
+Message received from port 12345: LIST file1.txt
+List operation successfully completed

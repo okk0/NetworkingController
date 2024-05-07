@@ -11,10 +11,12 @@ public class Controller {
     private int rebalancePeriod; // Rebalance period in seconds
     private ServerSocket serverSocket;
     private volatile boolean running = true;
-    private Map<String, DstoreInfo> dstores = new ConcurrentHashMap<>();
+    
     private ConcurrentHashMap<String, String> fileIndex; // Track file states
     private ConcurrentHashMap<String, Set<String>> storeAcks = new ConcurrentHashMap<>();
     private Map<String, Socket> clientConnections = new ConcurrentHashMap<>();
+    private Map<String, DstoreInfo> dstores = new ConcurrentHashMap<>();
+    private Map<String, String> fileToClientAddress = new ConcurrentHashMap<>();
 
     public Controller(int port, int replicationFactor, int timeout, int rebalancePeriod) {
         this.port = port;
@@ -37,9 +39,11 @@ public class Controller {
         while (running) {
             try {
                 Socket socket = serverSocket.accept();
-                System.out.println("New connection from " + socket.getRemoteSocketAddress());
+                String address = socket.getRemoteSocketAddress().toString();
+                System.out.println("New connection from " + address);
+    
                 // Handle each connection in a new thread
-                new Thread(() -> handleConnection(socket)).start();
+                new Thread(() -> handleConnection(socket, address)).start();
             } catch (IOException e) {
                 System.out.println("Error accepting connection: " + e.getMessage());
             }
@@ -47,81 +51,102 @@ public class Controller {
     }
     
 
-    private void handleConnection(Socket socket) {
+    private void handleConnection(Socket socket, String address) {
         try {
             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
     
-            String message;
-            while (running && !socket.isClosed()) {  // Ensure the server is still running and socket isn't closed
-                message = reader.readLine();
+            String initialMessage = reader.readLine(); // First message identifies the entity
+            if (initialMessage == null) {
+                socket.close();
+                return;
+            }
+    
+            String[] initialParts = initialMessage.split(" ");
+            if (initialParts.length == 0) {
+                socket.close();
+                return;
+            }
+    
+            // Determine if this is a Dstore or a Client
+            if (initialParts[0].equals("JOIN") && initialParts.length >= 2) {
+                handleJoin(socket, initialMessage);
+                writer.println("JOIN_ACK");
+            } else {
+                clientConnections.putIfAbsent(address, socket); // Register the client
+                System.out.println("Client connection registered: " + address);
+                handleClientRequest(socket, initialParts, writer, address); // Process initial client command
+            }
+    
+            // Continue reading further commands from the connection
+            while (running && !socket.isClosed()) {
+                String message = reader.readLine();
                 if (message == null) {
-                    // If the client closes the connection, stop the loop
-                    break;
+                    break; // Client or Dstore closed the connection
                 }
+    
                 String[] parts = message.split(" ");
                 if (parts.length == 0) {
                     continue; // Skip empty messages
                 }
     
-                switch (parts[0]) {
-                    case "JOIN":
-                        if (parts.length < 2) {
-                            System.out.println("Malformed JOIN message");
-                        } else {
-                            handleJoin(socket, message);
-                            writer.println("JOIN_ACK");
-                            System.out.println("JOIN_ACK");
-                        }
-                        break;
-                    case "STORE_ACK":
-                        System.out.println("STORE_ACK received");
-                        if (parts.length < 2) {
-                            System.out.println("Malformed STORE_ACK message");
-                        } else {
-                            handleStoreAck(parts[1], socket);
-                        }
-                        break;
-    
-                    default:
-                        handleClientRequest(socket, parts, writer);
-                        // Before handling the store, register the client socket
-                        break;
+                // Delegate the appropriate processing based on the type
+                if (dstores.containsKey(address)) {
+                    // Dstore commands like STORE_ACK
+                    if (parts[0].equals("STORE_ACK") && parts.length >= 2) {
+                        handleStoreAck(parts[1], socket);
+                    }
+                } else {
+                    // Client commands
+                    handleClientRequest(socket, parts, writer, address);
                 }
             }
         } catch (IOException e) {
             System.out.println("Error handling connection: " + e.getMessage());
         } finally {
-            if (!socket.isClosed()) {
-                try {
-                    socket.close();  // Only close the socket if it's not already closed
-                } catch (IOException e) {
-                    System.out.println("Error closing socket: " + e.getMessage());
-                }
+            // Cleanup and remove the connection from relevant maps
+            clientConnections.remove(address);
+            dstores.remove(address);
+            try {
+                socket.close();
+            } catch (IOException e) {
+                System.out.println("Error closing socket: " + e.getMessage());
             }
         }
     }
     
     
-    private void handleClientRequest(Socket clientSocket, String[] commandParts, PrintWriter writer) {
-        clientConnections.put(commandParts[1], clientSocket); // Save the client connection
+    
+    private void handleClientRequest(Socket socket, String[] commandParts, PrintWriter writer, String address) {
+        // Example handling of client commands
+        if (commandParts.length == 0) {
+            writer.println("ERROR_EMPTY_COMMAND");
+            return;
+        }
+    
         switch (commandParts[0]) {
             case "LIST":
+                System.out.println("List received from client: " + address);
                 processListCommand(writer);
                 break;
             case "STORE":
+                System.out.println("Store received from client: " + address);
                 if (commandParts.length < 3) {
                     writer.println("ERROR_MALFORMED_COMMAND");
-                } else { 
-                    handleStoreCommand(commandParts, writer, clientSocket); // Pass clientSocket for further use
+                } else {
+                    handleStoreCommand(commandParts, writer, socket);
                 }
                 break;
             case "LOAD":
+                System.out.println("Load received from client: " + address);
                 if (commandParts.length < 2) {
-                        writer.println("ERROR_MALFORMED_COMMAND");
-                } else { 
+                    writer.println("ERROR_MALFORMED_COMMAND");
+                } else {
                     processLoadCommand(commandParts, writer);
                 }
+                break;
+            default:
+                writer.println("ERROR_UNKNOWN_COMMAND");
                 break;
         }
     }
@@ -184,21 +209,35 @@ public class Controller {
  
     private void notifyClientStoreComplete(String filename) {
         System.out.println("notifyCli");
-        Socket clientSocket = clientConnections.get(filename);
-        if (clientSocket != null) {
-            try {
-                PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true);
-                System.out.println("STORE_COMPLETE");
-                writer.println("STORE_COMPLETE");
-            } catch (IOException e) {
-                System.out.println("Failed to notify client for filename: " + filename);
+    
+        // Retrieve the client's address for this specific filename
+        String clientAddress = fileToClientAddress.get(filename);
+        if (clientAddress != null) {
+            Socket clientSocket = clientConnections.get(clientAddress);
+            if (clientSocket != null) {
+                try {
+                    PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true);
+                    System.out.println("STORE_COMPLETE");
+                    writer.println("STORE_COMPLETE");
+                } catch (IOException e) {
+                    System.out.println("Failed to notify client for filename: " + filename);
+                }
+            } else {
+                System.out.println("Client socket not found for filename: " + filename);
             }
+        } else {
+            System.out.println("Client address not found for filename: " + filename);
         }
     }
     
     private void handleStoreCommand(String[] commandParts, PrintWriter clientWriter, Socket clientSocket) {
         System.out.println("STORE");
         String filename = commandParts[1];
+
+        String clientAddress = clientSocket.getRemoteSocketAddress().toString();
+        System.out.println("Store command received from client: " + clientAddress + " for file: " + filename);
+        fileToClientAddress.put(filename, clientAddress);
+
         if (fileIndex.containsKey(filename) && fileIndex.get(filename).equals("store complete")) {
             clientWriter.println("ERROR_FILE_ALREADY_EXISTS");
             return;
