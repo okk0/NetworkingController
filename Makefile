@@ -11,6 +11,7 @@ JFLAGS = -cp $(JAR)
 
 CONTROLLER = Controller
 DSTORE = Dstore
+FILEINFO = FileInfo
 DSTOREINFO = DstoreInfo
 
 # Default target
@@ -22,6 +23,7 @@ compile: $(CONTROLLER).java $(DSTORE).java
 	$(JAVAC) $(SRC_DIR)/$(CONTROLLER).java
 	$(JAVAC) $(SRC_DIR)/$(DSTORE).java
 	$(JAVAC) $(SRC_DIR)/$(DSTOREINFO).java
+	$(JAVAC) $(SRC_DIR)/$(FILEINFO).java
 
 # Run the Controller
 run-controller:

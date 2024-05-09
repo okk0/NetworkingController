@@ -5,15 +5,17 @@ import java.util.Comparator;
 
 public class Dstore {
     private ServerSocket serverSocket;
-    private int port;
     private Socket controllerSocket;
     private PrintWriter controllerOut;
     private BufferedReader controllerIn;
-    private String controllerHost;
-    private int controllerPort;
+    private final String controllerHost;
+    private final int controllerPort;
+    private final int port;
+    private final int timeout;
     private boolean running = true;
-    private String fileFolder;
-    private int timeout; // Timeout in milliseconds
+    private final String fileFolder;
+    private static final int CLIENT_TIMEOUT_MS = 10000; // Example: 10 seconds
+    private static final int CONTROLLER_RECONNECT_DELAY_MS = 5000; // 5 seconds
 
     public Dstore(int port, String controllerHost, int controllerPort, int timeout, String fileFolder) {
         this.port = port;
@@ -23,16 +25,64 @@ public class Dstore {
         this.fileFolder = fileFolder;
     }
 
-    public void start() throws IOException {
+    public void start() {
         clearLocalData();
-        connectToController();
-    
-        serverSocket = new ServerSocket(port); // Ensure this comes before accepting connections
-        System.out.println("Dstore listening on port: " + port);
-    
-        new Thread(this::acceptClientConnections).start(); // Listen for client connections
+        connectToControllerWithRetries();
+
+        try {
+            serverSocket = new ServerSocket(port);
+            System.out.println("Dstore listening on port: " + port);
+
+            // Start a new thread for handling controller commands
+            new Thread(this::handleControllerCommands).start();
+
+            // Start listening for client connections
+            new Thread(this::acceptClientConnections).start();
+        } catch (IOException e) {
+            System.out.println("Error starting Dstore server: " + e.getMessage());
+        }
     }
-    
+
+    // Handles commands from the controller
+    private void handleControllerCommands() {
+        while (running) {
+            try {
+                String command;
+                while ((command = controllerIn.readLine()) != null) {
+                    System.out.println("Received command from controller: " + command);
+                    String[] parts = command.split(" ");
+                    if (parts.length < 2) {
+                        System.out.println("Malformed command from controller: " + command);
+                        continue;
+                    }
+
+                    switch (parts[0]) {
+                        case "REMOVE":
+                            handleRemoveCommand(parts[1], controllerOut);  // Use the controller's output stream
+                            break;
+                        default:
+                            System.out.println("Unknown command from controller: " + command);
+                            break;
+                    }
+                }
+            } catch (IOException e) {
+                System.out.println("Controller connection error: " + e.getMessage());
+                
+            }
+        }
+    }
+
+   
+
+    private boolean connectToControllerWithRetries() {
+        try {
+            connectToController();
+            return true;
+        } catch (IOException e) {
+            System.out.println("Failed to connect to controller: " + e.getMessage());
+            return false;
+        }
+    }
 
     private void acceptClientConnections() {
         while (running) {
@@ -46,70 +96,185 @@ public class Dstore {
             }
         }
     }
-    
-    private void handleClientConnection(Socket clientSocket) {
-        try {
-            System.out.println("Connection established with client: " + clientSocket.getRemoteSocketAddress());
-    
-            BufferedReader reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-            PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true);
-            
-            String header = reader.readLine();
-            if (header == null) {
-                System.out.println("No data received. Client might have closed the connection.");
-                return;
-            }
-    
-            System.out.println("Received command: " + header);
-            String[] parts = header.split(" ");
-            if (parts.length != 3 || !parts[0].equals("STORE")) {
-                writer.println("ERROR_MALFORMED_COMMAND");
-                System.out.println("Malformed STORE command: " + header);
-                return;
-            }
-    
-            String filename = parts[1];
-            int filesize = Integer.parseInt(parts[2]);
-            System.out.println("Preparing to store file: " + filename + " with size: " + filesize);
-    
-            File file = new File(fileFolder, filename);
-            writer.println("ACK");  // Send ACK to client to start sending the file content
-            System.out.println("Sent ACK to client.");
-            System.out.println(fileFolder);
-            // Prepare to receive the file data
-            byte[] buffer = new byte[4096];
-            int bytesRead;
-            int totalRead = 0;
-    
-            // Open a file output stream to write the incoming file data
-            try (FileOutputStream fileOut = new FileOutputStream(file)) {
-                InputStream fileStream = clientSocket.getInputStream();
-                while (totalRead < filesize && (bytesRead = fileStream.read(buffer)) != -1) {
-                    fileOut.write(buffer, 0, bytesRead);
-                    totalRead += bytesRead;
-                    System.out.println("Received " + totalRead + " bytes so far.");
-                }
-            }
-    
-            if (totalRead == filesize) {
-                notifyControllerStoreAck(filename);  // Notify the controller of successful storage
-                System.out.println("File stored successfully: " + filename);
+
+    private void handleRemoveCommand(String filename, PrintWriter writer) {
+        File file = new File(fileFolder, filename);
+        System.out.println("Processing REMOVE command for file: " + filename);
+        if (file.delete()) {
+            System.out.println("File successfully removed: " + filename);
+            writer.println("REMOVE_ACK " + filename);
+        } else {
+            System.out.println("Failed to remove file: " + filename);
+            if (!file.exists()) {
+                writer.println("ERROR_FILE_DOES_NOT_EXIST " + filename);
             } else {
-                System.out.println("File transfer incomplete. Expected: " + filesize + ", received: " + totalRead);
-            }
-            
-        } catch (IOException e) {
-            System.out.println("Error handling client store operation: " + e.getMessage());
-        } finally {
-            try {
-                clientSocket.close();
-                System.out.println("Closed client connection.");
-            } catch (IOException e) {
-                System.out.println("Failed to close client connection: " + e.getMessage());
+                writer.println("ERROR_DELETING_FILE " + filename);
             }
         }
     }
+
     
+    private void handleClientConnection(Socket clientSocket) {
+        System.out.println("Connection established with client: " + clientSocket.getRemoteSocketAddress());
+    
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+             PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true)) {
+    
+            String header;
+    
+            // Loop to continuously listen for commands from the client
+            while ((header = reader.readLine()) != null) {
+                System.out.println("Received command: " + header);
+                String[] parts = header.split(" ");
+                if (parts.length < 2) {
+                    writer.println("ERROR_MALFORMED_COMMAND");
+                    System.out.println("Malformed command: " + header);
+                    continue; // Continue to the next iteration to process further commands
+                }
+    
+                // Handle STORE, LOAD_DATA, and REMOVE commands
+                switch (parts[0]) {
+                    case "STORE":
+                        handleStoreCommand(parts, writer, clientSocket);
+                        System.out.println("STORE");
+                        break;
+                    case "LOAD_DATA":
+                        handleLoadDataCommand(parts[1], clientSocket);
+                        System.out.println("LOAD DATA");
+                        break;
+                    default:
+                        writer.println("ERROR_UNKNOWN_COMMAND");
+                        System.out.println("Unknown command: " + header);
+                        break;
+                }
+            }
+    
+            System.out.println("Client disconnected: " + clientSocket.getRemoteSocketAddress());
+    
+        } catch (IOException e) {
+            System.out.println("Error handling client operation: " + e.getMessage());
+        }
+    }
+    
+      
+    
+    // Shared utility method to read and write file data
+    private void transferFileData(InputStream inputStream, OutputStream outputStream, int bufferSize) throws IOException {
+        byte[] buffer = new byte[bufferSize];
+        int bytesRead;
+        int totalBytesTransferred = 0;
+        while ((bytesRead = inputStream.read(buffer)) != -1) {
+            outputStream.write(buffer, 0, bytesRead);
+            totalBytesTransferred += bytesRead;
+            System.out.println("Transferred " + totalBytesTransferred + " bytes so far.");
+        }
+        outputStream.flush();
+        System.out.println("Total bytes transferred: " + totalBytesTransferred);
+    }
+
+    private void handleLoadDataCommand(String filename, Socket clientSocket) {
+        System.out.println("Loading file: " + filename);
+        File file = new File(fileFolder, filename);
+
+        // Additional debugging information
+        System.out.println("File path: " + file.getAbsolutePath());
+        System.out.println("File exists: " + file.exists());
+        System.out.println("Is a file: " + file.isFile());
+        System.out.println("File length: " + file.length());
+
+        if (!file.exists() || !file.isFile()) {
+            System.out.println("File not found or is not a file: " + filename);
+            try (PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true)) {
+                writer.println("ERROR_FILE_DOES_NOT_EXIST");
+            } catch (IOException e) {
+                System.out.println("Error writing error message to client: " + e.getMessage());
+            }
+            return;
+        }
+
+        // Set a socket read timeout
+        try {
+            clientSocket.setSoTimeout(CLIENT_TIMEOUT_MS); // Replace CLIENT_TIMEOUT_MS with the appropriate timeout value
+            System.out.println("Socket timeout set to " + CLIENT_TIMEOUT_MS + " ms");
+        } catch (SocketException e) {
+            System.out.println("Failed to set socket timeout: " + e.getMessage());
+        }
+
+        // Transfer file data using the shared utility function
+        try (InputStream fileInputStream = new FileInputStream(file);
+            OutputStream clientOutputStream = clientSocket.getOutputStream()) {
+            System.out.println("Starting file transfer to client...");
+            transferFileData(fileInputStream, clientOutputStream, 1024); // Reduced buffer size to 1024 bytes
+            System.out.println("File successfully sent to client: " + filename);
+        } catch (IOException e) {
+            System.out.println("Error sending file to client: " + e.getMessage());
+            try (PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true)) {
+                writer.println("ERROR_SENDING_FILE");
+            } catch (IOException ex) {
+                System.out.println("Error writing error message to client: " + ex.getMessage());
+            }
+        }
+    }
+
+
+    private void handleStoreCommand(String[] commandParts, PrintWriter writer, Socket clientSocket) {
+        if (commandParts.length != 3) {
+            writer.println("ERROR_MALFORMED_COMMAND");
+            System.out.println("Malformed STORE command: " + String.join(" ", commandParts));
+            return;
+        }
+
+        String filename = commandParts[1];
+        int filesize;
+        try {
+            filesize = Integer.parseInt(commandParts[2]);
+        } catch (NumberFormatException e) {
+            writer.println("ERROR_MALFORMED_COMMAND");
+            System.out.println("Invalid file size in STORE command: " + commandParts[2]);
+            return;
+        }
+
+        System.out.println("Preparing to store file: " + filename + " with size: " + filesize);
+
+        // Create a new file in the designated storage folder
+        File file = new File(fileFolder, filename);
+
+        // Send an ACK to the client indicating readiness to receive the file
+        writer.println("ACK");
+        System.out.println("Sent ACK to client.");
+
+        // Prepare to receive the file data
+        byte[] buffer = new byte[4096];
+        int totalRead = 0;
+
+        try (FileOutputStream fileOut = new FileOutputStream(file)) {
+            InputStream fileStream = clientSocket.getInputStream();
+            while (totalRead < filesize) {
+                int bytesRead = fileStream.read(buffer);
+                if (bytesRead == -1) {
+                    break;
+                }
+                fileOut.write(buffer, 0, bytesRead);
+                totalRead += bytesRead;
+                System.out.println("Received " + totalRead + " bytes so far.");
+            }
+        } catch (IOException e) {
+            System.out.println("Error storing file: " + filename + ". " + e.getMessage());
+            writer.println("ERROR_STORING_FILE");
+            return;
+        }
+
+        // Verify that the entire file was received
+        if (totalRead == filesize) {
+            notifyControllerStoreAck(filename);  // Notify the controller of successful storage
+            System.out.println("File stored successfully: " + filename);
+        } else {
+            System.out.println("File transfer incomplete. Expected: " + filesize + ", received: " + totalRead);
+            writer.println("ERROR_STORING_FILE");
+        }
+    }
+
+        
     
 
     private void notifyControllerStoreAck(String filename) {
@@ -154,6 +319,15 @@ public class Dstore {
         System.out.println("Sent JOIN message with port: " + port);
     }
     
+    private void closeControllerConnection() {
+        try {
+            if (controllerSocket != null && !controllerSocket.isClosed()) {
+                controllerSocket.close();
+            }
+        } catch (IOException e) {
+            System.out.println("Error closing the controller connection: " + e.getMessage());
+        }
+    }
 
     public void stop() {
         running = false;
@@ -183,7 +357,7 @@ public class Dstore {
         try {
             Dstore dstore = new Dstore(port, controllerHost, controllerPort, timeout, fileFolder);
             dstore.start();
-        } catch (IOException e) {
+        } catch (Exception e) {
             System.out.println("Failed to start Dstore: " + e.getMessage());
         }
     }
