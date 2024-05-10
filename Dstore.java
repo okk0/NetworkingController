@@ -66,7 +66,7 @@ public class Dstore {
                     }
                 }
             } catch (IOException e) {
-                System.out.println("Controller connection error: " + e.getMessage());
+                break;
                 
             }
         }
@@ -319,16 +319,6 @@ public class Dstore {
         System.out.println("Sent JOIN message with port: " + port);
     }
     
-    private void closeControllerConnection() {
-        try {
-            if (controllerSocket != null && !controllerSocket.isClosed()) {
-                controllerSocket.close();
-            }
-        } catch (IOException e) {
-            System.out.println("Error closing the controller connection: " + e.getMessage());
-        }
-    }
-
     public void stop() {
         running = false;
         try {

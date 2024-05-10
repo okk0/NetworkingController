@@ -27,17 +27,17 @@ compile: $(CONTROLLER).java $(DSTORE).java
 
 # Run the Controller
 run-controller:
-	$(JAVA) $(CONTROLLER) 12345 3 1000 30
+	$(JAVA) $(CONTROLLER) 12345 3 3000 30
 
 # Run a Dstore
 run-dstore:
-	$(JAVA) $(DSTORE) 12346 12345 1000 data
+	$(JAVA) $(DSTORE) 12346 12345 3000 data
 
 run-dstore2:
-	$(JAVA) $(DSTORE) 12347 12345 1000 data2
+	$(JAVA) $(DSTORE) 12347 12345 3000 data2
 
 run-dstore3:
-	$(JAVA) $(DSTORE) 12348 12345 1000 data3
+	$(JAVA) $(DSTORE) 12348 12345 3000 data3
 
 # Run all Dstores simultaneously on Windows
 run-all-dstores:
