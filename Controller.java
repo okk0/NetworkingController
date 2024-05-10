@@ -55,36 +55,49 @@ public class Controller {
     
 
     private void handleConnection(Socket socket, String address) {
-        boolean shouldClose = true; // Flag to determine if the socket should be closed in finally block
+        boolean isDstore = false;
+        boolean shouldClose = true;
     
         try {
             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
     
+            // Read the initial message
             String initialMessage = reader.readLine();
-    
             if (initialMessage == null) {
-                shouldClose = true;
+                System.out.println("Initial message from " + address + " is null");
                 return;
             }
     
             String[] initialParts = initialMessage.split(" ");
-            if (initialParts.length == 0) {
-                shouldClose = true;
-                return;
-            }
+            
     
-            // Determine if this is a Dstore or a client
-            if (initialParts[0].equals("JOIN") && initialParts.length >= 2) {
-                handleJoin(socket, initialMessage);
-                writer.println("JOIN_ACK");
+            // Identify if the connection is a Dstore or a client
+            if (initialParts[0].equals("JOIN")) {
+                try {
+                    int port = Integer.parseInt(initialParts[1]);
+    
+                    // Add the Dstore information
+                    dstores.put(address, new DstoreInfo(socket, port));
+                    isDstore = true;
+                    shouldClose = false;
+                    System.out.println("Dstore joined: " + address + " on port " + port);
+    
+                    
+                } catch (NumberFormatException e) {
+                    System.out.println("Invalid port provided in JOIN message: " + initialParts[1]);
+                }
             } else {
+                // Assume it's a client connection
                 clientConnections.putIfAbsent(address, socket);
+                shouldClose = false;
                 System.out.println("Client connection registered: " + address);
+    
+                // Handle the initial client request here if needed
                 handleClientRequest(socket, initialParts, writer, address);
             }
     
-            // Start processing messages
+            // Start processing further commands
             while (running && !socket.isClosed()) {
                 String message = reader.readLine();
                 if (message == null) {
@@ -95,7 +108,8 @@ public class Controller {
                 String[] parts = message.split(" ");
                 if (parts.length == 0) continue;
     
-                if (dstores.containsKey(address)) {
+                // Handle Dstore commands
+                if (isDstore && dstores.containsKey(address)) {
                     switch (parts[0]) {
                         case "STORE_ACK":
                             if (parts.length >= 2) handleStoreAck(parts[1], socket);
@@ -108,31 +122,36 @@ public class Controller {
                             break;
                     }
                 } else {
+                    // Handle client commands
                     handleClientRequest(socket, parts, writer, address);
                 }
             }
-        } catch (SocketException se) {
-            System.out.println("Socket exception with " + address + ": " + se.getMessage());
+    
         } catch (IOException e) {
             System.out.println("Error handling connection for " + address + ": " + e.getMessage());
         } finally {
             if (shouldClose) {
+                if (isDstore) {
+                    removeDstore(address);
+                }
                 clientConnections.remove(address);
-                dstores.remove(address);
                 try {
                     socket.close();
                     System.out.println("Socket closed for " + address);
                 } catch (IOException e) {
                     System.out.println("Error closing socket for " + address + ": " + e.getMessage());
                 }
-            } else {
-                System.out.println("Socket kept open for " + address);
             }
         }
     }
     
     
     
+    
+    private void removeDstore(String address) {
+        dstores.remove(address);
+        System.out.println("Removed Dstore: " + address);
+    }
     
     
     
@@ -193,8 +212,42 @@ public class Controller {
     
     /////////////////////////////////REMOVE////////////////////////////////////////////////////////////////
 
-
-
+    private void handleRemoveAck(String filename, String dstoreAddress) {
+        ConcurrentSkipListSet<String> acks = pendingRemoveAcks.get(filename);
+        if (acks != null) {
+            acks.remove(dstoreAddress);
+            System.out.println("Received REMOVE_ACK for file: " + filename + " from " + dstoreAddress);
+    
+            // Check if all acknowledgments have been received
+            if (acks.isEmpty()) {
+                // Remove the file from the index and clear pending acks
+                fileIndex.remove(filename);
+                pendingRemoveAcks.remove(filename);
+    
+                // Find the client associated with this file removal
+                String clientAddress = removefileToClientAddress.get(filename);
+                if (clientAddress != null) {
+                    Socket clientSocket = clientConnections.get(clientAddress);
+                    if (clientSocket != null && !clientSocket.isClosed()) {
+                        try {
+                            PrintWriter clientWriter = new PrintWriter(clientSocket.getOutputStream(), true);
+                            clientWriter.println("REMOVE_COMPLETE");
+                            System.out.println("Remove operation completed for file " + filename);
+                        } catch (IOException e) {
+                            System.out.println("Error sending REMOVE_COMPLETE to client: " + e.getMessage());
+                        }
+                    } else {
+                        System.out.println("Client socket unavailable or already closed: " + clientAddress);
+                    }
+                }
+    
+                // Cleanup the client-to-file mapping after completion
+                removefileToClientAddress.remove(filename);
+            }
+        } else {
+            System.out.println("Received REMOVE_ACK for non-existent file: " + filename);
+        }
+    }
     
     private void handleRemoveCommand(String[] commandParts, PrintWriter writer, String clientAddress) {
         String filename = commandParts[1];
@@ -235,7 +288,9 @@ public class Controller {
     
             Socket dstoreSocket = dstoreInfo.getSocket();
             if (dstoreSocket != null) {
-                try (PrintWriter dstoreWriter = new PrintWriter(dstoreSocket.getOutputStream(), true)) {
+                try {
+                    // Use an existing socket connection to send the command
+                    PrintWriter dstoreWriter = new PrintWriter(dstoreSocket.getOutputStream(), true);
                     dstoreWriter.println("REMOVE " + filename);
                     System.out.println("Sent REMOVE command to Dstore: " + dstore);
                 } catch (IOException e) {
@@ -248,41 +303,6 @@ public class Controller {
     }
     
     
-
-    
-    private void handleRemoveAck(String filename, String dstoreAddress) {
-        ConcurrentSkipListSet<String> acks = pendingRemoveAcks.get(filename);
-        if (acks != null) {
-            acks.remove(dstoreAddress);
-            System.out.println("Received REMOVE_ACK for file: " + filename + " from " + dstoreAddress);
-
-            // Check if all acknowledgments have been received
-            if (acks.isEmpty()) {
-                fileIndex.remove(filename);
-                pendingRemoveAcks.remove(filename);
-
-                // Find the client associated with the remove command
-                String clientAddress = removefileToClientAddress.get(filename);
-                if (clientAddress != null) {
-                    Socket clientSocket = clientConnections.get(clientAddress);
-                    if (clientSocket != null && !clientSocket.isClosed()) {
-                        try {
-                            PrintWriter clientWriter = new PrintWriter(clientSocket.getOutputStream(), true);
-                            clientWriter.println("REMOVE_COMPLETE");
-                            System.out.println("Remove operation completed for file " + filename);
-                        } catch (IOException e) {
-                            System.out.println("Error sending REMOVE_COMPLETE to client: " + e.getMessage());
-                        }
-                    } else {
-                        System.out.println("Client socket unavailable or already closed: " + clientAddress);
-                    }
-                }
-
-                // Cleanup the client-to-file mapping after completion
-                removefileToClientAddress.remove(filename);
-            }
-        }
-    }
     
     
     

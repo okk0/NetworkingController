@@ -27,9 +27,10 @@ public class Dstore {
 
     public void start() {
         clearLocalData();
-        connectToControllerWithRetries();
+        
 
         try {
+            connectToController();
             serverSocket = new ServerSocket(port);
             System.out.println("Dstore listening on port: " + port);
 
@@ -43,46 +44,7 @@ public class Dstore {
         }
     }
 
-    // Handles commands from the controller
-    private void handleControllerCommands() {
-        while (running) {
-            try {
-                String command;
-                while ((command = controllerIn.readLine()) != null) {
-                    System.out.println("Received command from controller: " + command);
-                    String[] parts = command.split(" ");
-                    if (parts.length < 2) {
-                        System.out.println("Malformed command from controller: " + command);
-                        continue;
-                    }
-
-                    switch (parts[0]) {
-                        case "REMOVE":
-                            handleRemoveCommand(parts[1], controllerOut);  // Use the controller's output stream
-                            break;
-                        default:
-                            System.out.println("Unknown command from controller: " + command);
-                            break;
-                    }
-                }
-            } catch (IOException e) {
-                break;
-                
-            }
-        }
-    }
-
-   
-
-    private boolean connectToControllerWithRetries() {
-        try {
-            connectToController();
-            return true;
-        } catch (IOException e) {
-            System.out.println("Failed to connect to controller: " + e.getMessage());
-            return false;
-        }
-    }
+    
 
     private void acceptClientConnections() {
         while (running) {
@@ -97,21 +59,6 @@ public class Dstore {
         }
     }
 
-    private void handleRemoveCommand(String filename, PrintWriter writer) {
-        File file = new File(fileFolder, filename);
-        System.out.println("Processing REMOVE command for file: " + filename);
-        if (file.delete()) {
-            System.out.println("File successfully removed: " + filename);
-            writer.println("REMOVE_ACK " + filename);
-        } else {
-            System.out.println("Failed to remove file: " + filename);
-            if (!file.exists()) {
-                writer.println("ERROR_FILE_DOES_NOT_EXIST " + filename);
-            } else {
-                writer.println("ERROR_DELETING_FILE " + filename);
-            }
-        }
-    }
 
     
     private void handleClientConnection(Socket clientSocket) {
@@ -314,22 +261,76 @@ public class Dstore {
         controllerOut = new PrintWriter(controllerSocket.getOutputStream(), true);
         controllerIn = new BufferedReader(new InputStreamReader(controllerSocket.getInputStream()));
     
-        // Send JOIN message along with the Dstore's listening port
-        controllerOut.println("JOIN " + port);  // Here, 'port' is the port Dstore listens on for client connections
+        controllerOut.println("JOIN " + port); // Register with the controller
         System.out.println("Sent JOIN message with port: " + port);
+    
+        // Listen for commands from the controller in a separate thread
+        new Thread(this::handleControllerCommands).start();
+    }
+
+    private void handleControllerCommands() {
+        while (running && controllerSocket.isConnected()) {
+            try {
+                String command = controllerIn.readLine();
+                if (command == null) {
+                    System.out.println("Lost connection to the controller");
+                    running = false;
+                    break;
+                }
+    
+                // Split the command to identify its parts
+                String[] parts = command.split(" ");
+                if (parts.length < 2) {
+                    System.out.println("Malformed command from controller: " + command);
+                    continue;
+                }
+    
+                // Process the command based on the type
+                switch (parts[0]) {
+                    case "REMOVE":
+                        handleRemoveCommand(parts[1], controllerOut); // Pass the filename and controller writer
+                        break;
+                    default:
+                        System.out.println("Unknown command from controller: " + command);
+                        break;
+                }
+    
+            } catch (IOException e) {
+                System.out.println("Error in controller communication: " + e.getMessage());
+                running = false;
+                break;
+            }
+        }
+        System.out.println("Stopped listening to the controller");
     }
     
+    private void handleRemoveCommand(String filename, PrintWriter controllerWriter) {
+        File file = new File(fileFolder, filename);
+        System.out.println("Processing REMOVE command for file: " + filename);
+    
+        if (file.delete()) {
+            System.out.println("File successfully removed: " + filename);
+            controllerWriter.println("REMOVE_ACK " + filename); // Acknowledge removal to the controller
+        } else {
+            System.out.println("Failed to remove file: " + filename);
+            if (!file.exists()) {
+                controllerWriter.println("ERROR_FILE_DOES_NOT_EXIST " + filename);
+            } else {
+                controllerWriter.println("ERROR_DELETING_FILE " + filename);
+            }
+        }
+    }
+    
+    
+    // Other methods remain the same...
+
     public void stop() {
         running = false;
         try {
-            if (serverSocket != null) {
-                serverSocket.close();
-            }
-            if (controllerSocket != null) {
-                controllerSocket.close();
-            }
+            if (serverSocket != null) serverSocket.close();
+            if (controllerSocket != null) controllerSocket.close();
         } catch (IOException e) {
-            System.out.println("Error while closing the connections: " + e.getMessage());
+            System.out.println("Error closing connections: " + e.getMessage());
         }
     }
 
