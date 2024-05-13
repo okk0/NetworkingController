@@ -2,18 +2,26 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class FileInfo {
-    String status; // The status of the file, e.g., "store complete"
-    Set<String> dstores; // A set of Dstores that contain this file
+    String status; 
+    Set<String> dstores; 
+    long fileSize;  
 
-    // Constructor that initializes status and creates an empty set of Dstores
-    public FileInfo(String status) {
+    public FileInfo(String status, long fileSize) {
         this.status = status;
-        this.dstores = ConcurrentHashMap.newKeySet(); // Initialize the Dstores set
+        this.fileSize = fileSize;
+        this.dstores = ConcurrentHashMap.newKeySet(); 
     }
 
-    // Optional: Override toString for better logging/debugging
     @Override
     public String toString() {
-        return "FileInfo{status='" + status + "', dstores=" + dstores + "}";
+        return "FileInfo{status='" + status + "', fileSize=" + fileSize + ", dstores=" + dstores + "}";
+    }
+
+    public long getFileSize() {
+        return fileSize;
+    }
+
+    public void setFileSize(long fileSize) {
+        this.fileSize = fileSize;
     }
 }

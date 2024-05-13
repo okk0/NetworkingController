@@ -1,5 +1,6 @@
 import java.io.*;
 import java.net.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -35,11 +36,9 @@ public class Dstore {
             serverSocket = new ServerSocket(port);
             System.out.println("Dstore listening on port: " + port);
 
-            // Start a new thread for handling controller commands
             new Thread(this::handleControllerCommands).start();
-
-            // Start listening for client connections
             new Thread(this::acceptClientConnections).start();
+
         } catch (IOException e) {
             System.out.println("Error starting Dstore server: " + e.getMessage());
         }
@@ -77,10 +76,9 @@ public class Dstore {
                 if (parts.length < 2) {
                     writer.println("ERROR_MALFORMED_COMMAND");
                     System.out.println("Malformed command: " + header);
-                    continue; // Continue to the next iteration to process further commands
+                    continue; 
                 }
-    
-                // Handle STORE, LOAD_DATA, and REMOVE commands
+
                 switch (parts[0]) {
                     case "STORE":
                         handleStoreCommand(parts, writer, clientSocket);
@@ -110,7 +108,9 @@ public class Dstore {
 
     private void handleLoadDataCommand(String filename, Socket clientSocket) {
         try {
-            // Construct the full file path
+            // Set the socket read timeout to zero (indefinite)
+            clientSocket.setSoTimeout(0);
+            System.out.println("LOAD client connection from: " + clientSocket.getRemoteSocketAddress());
             File file = new File(fileFolder + File.separator + filename);
 
             // Check if the file exists
@@ -120,19 +120,16 @@ public class Dstore {
                 return;
             }
 
-            // Read all bytes from the file
             byte[] fileContent = Files.readAllBytes(file.toPath());
+            System.out.println(new String(fileContent, StandardCharsets.UTF_8));
 
-            // Get the output stream of the client socket
             OutputStream out = clientSocket.getOutputStream();
 
-            // Write the file content to the client's output stream
             out.write(fileContent);
             out.flush();
+            System.out.println("file successful written" + filename);
         } catch (Exception e) {
             System.err.println(clientSocket.getPort() + " in dstore " + port + " :Error loading file: " + e.getMessage());
-
-            // Attempt to close the client socket
             try {
                 clientSocket.close();
             } catch (IOException e1) {
@@ -162,10 +159,8 @@ public class Dstore {
 
         System.out.println("Preparing to store file: " + filename + " with size: " + filesize);
 
-        // Create a new file in the designated storage folder
         File file = new File(fileFolder, filename);
 
-        // Send an ACK to the client indicating readiness to receive the file
         writer.println("ACK");
         System.out.println("Sent ACK to client.");
 
@@ -192,7 +187,7 @@ public class Dstore {
 
         // Verify that the entire file was received
         if (totalRead == filesize) {
-            notifyControllerStoreAck(filename);  // Notify the controller of successful storage
+            notifyControllerStoreAck(filename);  
             System.out.println("File stored successfully: " + filename);
         } else {
             System.out.println("File transfer incomplete. Expected: " + filesize + ", received: " + totalRead);
@@ -240,7 +235,6 @@ private void handleRebalanceCommand(String[] commandParts) {
             }
         }
 
-        // Remove files as requested
         for (String filename : filesToRemove) {
             File file = new File(fileFolder, filename);
             if (file.exists()) {
@@ -249,7 +243,6 @@ private void handleRebalanceCommand(String[] commandParts) {
             }
         }
 
-        // Notify controller of rebalance completion
         notifyControllerRebalanceComplete();
     }
 
@@ -263,7 +256,7 @@ private void handleRebalanceCommand(String[] commandParts) {
             long fileSize = new File(fileFolder, filename).length();
             writer.println("REBALANCE_STORE " + filename + " " + fileSize);
 
-            // Await acknowledgment
+       
             String response = reader.readLine();
             if (response.equals("ACK")) {
                 byte[] buffer = new byte[4096];
@@ -292,14 +285,12 @@ private void clearLocalData() {
             Path directory = Paths.get(fileFolder);
             if (!Files.exists(directory)) {
                 System.out.println("Directory does not exist, expected to exist: " + directory);
-                return; // Optionally throw an exception or handle this case as needed
+                return; 
             }
-    
-            // Use Files.walk to iterate through all files and subdirectories, but skip the top-level directory
             Files.walk(directory)
-                 .sorted(Comparator.reverseOrder()) // Important for deleting directories after their contents
+                 .sorted(Comparator.reverseOrder()) 
                  .map(Path::toFile)
-                 .filter(file -> !file.equals(directory.toFile())) // Skip the root directory itself
+                 .filter(file -> !file.equals(directory.toFile())) 
                  .forEach(File::delete);
     
             System.out.println("Cleared local data in existing directory successfully.");
@@ -315,7 +306,7 @@ private void clearLocalData() {
         controllerOut = new PrintWriter(controllerSocket.getOutputStream(), true);
         controllerIn = new BufferedReader(new InputStreamReader(controllerSocket.getInputStream()));
     
-        controllerOut.println("JOIN " + port); // Register with the controller
+        controllerOut.println("JOIN " + port); 
         System.out.println("Sent JOIN message with port: " + port);
     
         // Listen for commands from the controller in a separate thread
@@ -338,7 +329,7 @@ private void clearLocalData() {
                     continue;
                 }
     
-                // Process the command based on the type
+              
                 switch (parts[0]) {
                     case "REMOVE":
                         if (parts.length < 2) {
@@ -389,7 +380,7 @@ private void clearLocalData() {
     
         if (file.delete()) {
             System.out.println("File successfully removed: " + filename);
-            controllerWriter.println("REMOVE_ACK " + filename); // Acknowledge removal to the controller
+            controllerWriter.println("REMOVE_ACK " + filename); 
         } else {
             System.out.println("Failed to remove file: " + filename);
             if (!file.exists()) {
@@ -401,8 +392,6 @@ private void clearLocalData() {
     }
     
 /////////////////////////////////// MAIN /////////////////////////////////////////////////////////////////////////////////////////////////
-
-    // Other methods remain the same...
 
     public void stop() {
         running = false;

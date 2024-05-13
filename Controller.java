@@ -24,7 +24,7 @@ public class Controller {
     private Map<String, String> removefileToClientAddress = new ConcurrentHashMap<>();
     private Map<String, Map<String, String>> clientToLastDstoreMap = new ConcurrentHashMap<>();
     private ConcurrentMap<String, ConcurrentSkipListSet<String>> pendingRemoveAcks = new ConcurrentHashMap<>();
-   
+    private Map<String, Map<String, Set<String>>> usedDstoresMap = new ConcurrentHashMap<>();
 
     public Controller(int port, int replicationFactor, int timeout, int rebalancePeriod) {
         this.port = port;
@@ -95,7 +95,7 @@ public class Controller {
                     System.out.println("Invalid port provided in JOIN message: " + initialParts[1]);
                 }
             } else {
-                // Assume it's a client connection
+               
                 clientConnections.putIfAbsent(address, socket);
                 shouldClose = false;
                 System.out.println("Client connection registered: " + address);
@@ -104,7 +104,7 @@ public class Controller {
                 handleClientRequest(socket, initialParts, writer, address);
             }
     
-            // Start processing further commands
+           
             while (running && !socket.isClosed()) {
                 String message = reader.readLine();
                 if (message == null) {
@@ -168,6 +168,11 @@ public class Controller {
             return;
         }
     
+        // Reset last used Dstore map for commands other than RELOAD
+        if (!commandParts[0].equals("RELOAD")) {
+            resetUsedDstores(address);
+        }
+    
         switch (commandParts[0]) {
             case "LIST":
                 System.out.println("List received from client: " + address);
@@ -200,7 +205,7 @@ public class Controller {
                     processReloadCommand(commandParts, writer, address);
                 }
                 break;
-
+    
             case "REMOVE":
                 System.out.println("Remove received from client: " + address);
                 if (commandParts.length < 2) {
@@ -209,13 +214,19 @@ public class Controller {
                     handleRemoveCommand(commandParts, writer, address);
                 }
                 break;
-
+    
             default:
                 writer.println("ERROR_UNKNOWN_COMMAND");
                 System.out.println("Unknown command received from client: " + address);
                 break;
         }
     }
+    
+    private void resetUsedDstores(String clientAddress) {
+        // Clears last used Dstore information
+        clientToLastDstoreMap.remove(clientAddress);
+    }
+    
     
     /////////////////////////////////REMOVE////////////////////////////////////////////////////////////////
 
@@ -248,7 +259,6 @@ public class Controller {
         Set<String> affectedDstores = fileInfo.dstores;
         System.out.println("Dstores expected to remove file: " + affectedDstores);
     
-        // Initialize a concurrent skip list set and populate it with the affected Dstores
         ConcurrentSkipListSet<String> pendingAckSet = new ConcurrentSkipListSet<>(affectedDstores);
     
         // Add to the pendingRemoveAcks map
@@ -260,13 +270,13 @@ public class Controller {
     
             if (dstoreInfo == null) {
                 System.out.println("Error: Dstore info not found for " + dstore);
-                continue;  // Skip this Dstore since it's not available
+                continue;  
             }
     
             Socket dstoreSocket = dstoreInfo.getSocket();
             if (dstoreSocket != null) {
                 try {
-                    // Use an existing socket connection to send the command
+                  
                     PrintWriter dstoreWriter = new PrintWriter(dstoreSocket.getOutputStream(), true);
                     dstoreWriter.println("REMOVE " + filename);
                     System.out.println("Sent REMOVE command to Dstore: " + dstore);
@@ -285,8 +295,8 @@ public class Controller {
                 ConcurrentSkipListSet<String> remainingAcks = pendingRemoveAcks.get(filename);
                 if (remainingAcks != null && !remainingAcks.isEmpty()) {
                     System.out.println("Timeout occurred waiting for REMOVE_ACKs. Remaining: " + remainingAcks);
-                    // The state will remain "remove in progress"
-                    // Future rebalances should ensure the file is not stored on any Dstore
+                    
+                   
                 }
             }
         }, timeout);
@@ -391,8 +401,6 @@ public class Controller {
         String dstoreId = socket.getRemoteSocketAddress().toString();
         System.out.println("Received STORE_ACK for " + filename + " from Dstore " + dstoreId);
 
-        // Initialize the file info in fileIndex if not already present
-        fileIndex.putIfAbsent(filename, new FileInfo("store in progress"));
         FileInfo fileInfo = fileIndex.get(filename);
         fileInfo.dstores.add(dstoreId);
 
@@ -433,7 +441,7 @@ public class Controller {
     private void handleStoreCommand(String[] commandParts, PrintWriter clientWriter, Socket clientSocket) {
         System.out.println("STORE");
         String filename = commandParts[1];
-    
+        
         String clientAddress = clientSocket.getRemoteSocketAddress().toString();
         System.out.println("Store command received from client: " + clientAddress + " for file: " + filename);
     
@@ -448,7 +456,7 @@ public class Controller {
         }
     
         // Initialize file information and set the status to "store in progress"
-        fileInfo = new FileInfo("store in progress");
+        fileInfo = new FileInfo("store in progress", Integer.parseInt(commandParts[2]));
         fileIndex.put(filename, fileInfo);
     
         // Select Dstores for storage
@@ -479,112 +487,117 @@ public class Controller {
 
 
     private void processReloadCommand(String[] commandParts, PrintWriter writer, String clientAddress) {
-    if (commandParts.length < 2) {
-        writer.println("ERROR_MALFORMED_COMMAND");
-        return;
-    }
-
-    String filename = commandParts[1];
-    System.out.println("DEBUG: Processing RELOAD command for file: " + filename + " from client: " + clientAddress);
-
-    // Check if the file is marked as stored completely
-    FileInfo fileInfo = fileIndex.get(filename);
-    if (fileInfo == null || !fileInfo.status.equals("store complete")) {
-        writer.println("ERROR_FILE_DOES_NOT_EXIST");
-        System.out.println("DEBUG: File does not exist or is not completely stored: " + filename);
-        return;
-    }
-
-    // Filter only active Dstores that have this file, excluding the previously used one
-    String lastDstore = clientToLastDstoreMap.getOrDefault(clientAddress, Collections.emptyMap()).get(filename);
-    List<String> availableDstores = fileInfo.dstores.stream()
-        .filter(dstores::containsKey)
-        .filter(dstore -> !dstore.equals(lastDstore))
-        .collect(Collectors.toList());
-
-    System.out.println("DEBUG: Available Dstores for " + filename + " excluding " + lastDstore + ": " + availableDstores);
-
-    // Check if an alternative Dstore is available
-    if (availableDstores.isEmpty()) {
-        writer.println("ERROR_LOAD");
-        System.out.println("DEBUG: No alternative Dstores available for " + filename);
-        return;
-    }
-
-    // Select a random alternative Dstore to load the file from
-    String chosenDstore = availableDstores.get(new Random().nextInt(availableDstores.size()));
-    DstoreInfo dstoreInfo = dstores.get(chosenDstore);
-
-    if (dstoreInfo == null) {
-        writer.println("ERROR_LOAD");
-        System.out.println("DEBUG: Dstore info not found for chosen Dstore: " + chosenDstore);
-        return;
-    }
-
-    // Update the last used Dstore for this client
-    clientToLastDstoreMap.computeIfAbsent(clientAddress, k -> new ConcurrentHashMap<>()).put(filename, chosenDstore);
-
-    // Get file size (example placeholder)
-    long fileSize = getFileSize(filename);
-    writer.println("LOAD_FROM " + dstoreInfo.getPort() + " " + fileSize);
-    System.out.println("DEBUG: LOAD_FROM command sent for " + filename + " from Dstore port " + dstoreInfo.getPort() + " with size " + fileSize);
-}
-
-private void processLoadCommand(String[] commandParts, PrintWriter writer, String clientAddress) {
-    if (commandParts.length < 2) {
-        writer.println("ERROR_MALFORMED_COMMAND");
-        return;
-    }
-
-    String filename = commandParts[1];
-    System.out.println("DEBUG: Processing LOAD command for file: " + filename);
-
-    // Check if the file is marked as stored completely
-    FileInfo fileInfo = fileIndex.get(filename);
-    if (fileInfo == null || !fileInfo.status.equals("store complete")) {
-        writer.println("ERROR_FILE_DOES_NOT_EXIST");
-        System.out.println("DEBUG: File does not exist or is not completely stored: " + filename);
-        return;
-    }
-
-    // Filter only active Dstores that have this file
-    List<String> availableDstores = fileInfo.dstores.stream()
-        .filter(dstores::containsKey)
-        .collect(Collectors.toList());
-
-    System.out.println("DEBUG: Available Dstores for " + filename + ": " + availableDstores);
-
-    // Check if we have enough Dstores available
-    if (availableDstores.isEmpty() || availableDstores.size() < replicationFactor) {
-        writer.println("ERROR_NOT_ENOUGH_DSTORES");
-        System.out.println("DEBUG: Not enough Dstores available for " + filename + ", found: " + availableDstores.size());
-        return;
-    }
-
-    // Select a random Dstore to load the file from
-    String chosenDstore = availableDstores.get(new Random().nextInt(availableDstores.size()));
-    DstoreInfo dstoreInfo = dstores.get(chosenDstore);
-
-    if (dstoreInfo == null) {
-        writer.println("ERROR_NOT_ENOUGH_DSTORES");
-        System.out.println("DEBUG: Dstore info not found for chosen Dstore: " + chosenDstore);
-        return;
-    }
-
-    // Update the last used Dstore for this client
-    clientToLastDstoreMap.computeIfAbsent(clientAddress, k -> new ConcurrentHashMap<>()).put(filename, chosenDstore);
-
-    // Get file size (example placeholder)
-    long fileSize = getFileSize(filename);
-    writer.println("LOAD_FROM " + dstoreInfo.getPort() + " " + fileSize);
-    System.out.println("DEBUG: LOAD_FROM command sent for " + filename + " from Dstore port " + dstoreInfo.getPort() + " with size " + fileSize);
-}
+        if (commandParts.length < 2) {
+            writer.println("ERROR_MALFORMED_COMMAND");
+            return;
+        }
     
+        String filename = commandParts[1];
+        System.out.println("DEBUG: Processing RELOAD command for file: " + filename + " from client: " + clientAddress);
+    
+        FileInfo fileInfo = fileIndex.get(filename);
+        if (fileInfo == null || !fileInfo.status.equals("store complete")) {
+            writer.println("ERROR_FILE_DOES_NOT_EXIST");
+            System.out.println("DEBUG: File does not exist or is not completely stored: " + filename);
+            return;
+        }
+    
+        // Retrieve or create the mapping for this client and file
+        Map<String, Set<String>> fileToUsedDstores = usedDstoresMap.getOrDefault(clientAddress, new HashMap<>());
+        Set<String> usedDstores = fileToUsedDstores.getOrDefault(filename, new HashSet<>());
+    
+        // Filter Dstores to exclude those already used
+        List<String> availableDstores = fileInfo.dstores.stream()
+            .filter(dstore -> !usedDstores.contains(dstore))
+            .collect(Collectors.toList());
+    
+        if (availableDstores.isEmpty()) {
+            writer.println("ERROR_LOAD");
+            System.out.println("DEBUG: No alternative Dstores available for " + filename);
+            return;
+        }
+    
+        // Select a random Dstore from available ones
+        Random random = new Random();
+        String chosenDstore = availableDstores.get(random.nextInt(availableDstores.size()));
+        DstoreInfo dstoreInfo = dstores.get(chosenDstore);
+    
+        if (dstoreInfo == null) {
+            writer.println("ERROR_LOAD");
+            System.out.println("DEBUG: Dstore info not found for chosen Dstore: " + chosenDstore);
+            return;
+        }
+    
+        // Update the set of used Dstores for this client and file
+        usedDstores.add(chosenDstore);
+        fileToUsedDstores.put(filename, usedDstores);
+        usedDstoresMap.put(clientAddress, fileToUsedDstores);
+    
+        long fileSize = getFileSize(filename);
+        writer.println("LOAD_FROM " + dstoreInfo.getPort() + " " + fileSize);
+        System.out.println("DEBUG: LOAD_FROM command sent for " + filename + " from Dstore port " + dstoreInfo.getPort() + " with size " + fileSize);
+    }
+    
+    
+
+    private void processLoadCommand(String[] commandParts, PrintWriter writer, String clientAddress) {
+        if (commandParts.length < 2) {
+            writer.println("ERROR_MALFORMED_COMMAND");
+            return;
+        }
+    
+        String filename = commandParts[1];
+        System.out.println("DEBUG: Processing LOAD command for file: " + filename);
+    
+        // Check if the file is marked as stored completely
+        FileInfo fileInfo = fileIndex.get(filename);
+        if (fileInfo == null || !fileInfo.status.equals("store complete")) {
+            writer.println("ERROR_FILE_DOES_NOT_EXIST");
+            System.out.println("DEBUG: File does not exist or is not completely stored: " + filename);
+            return;
+        }
+    
+        // Retrieve all Dstores that have the file stored, ignoring used Dstores tracking
+        List<String> availableDstores = new ArrayList<>(fileInfo.dstores);
+    
+        System.out.println("DEBUG: Available Dstores for " + filename + ": " + availableDstores);
+    
+        // Check if we have enough Dstores available
+        if (availableDstores.isEmpty()) {
+            writer.println("ERROR_NOT_ENOUGH_DSTORES");
+            System.out.println("DEBUG: Not enough Dstores available for " + filename + ", found: " + availableDstores.size());
+            return;
+        }
+    
+        // Select a random Dstore to load the file from
+        Random random = new Random();
+        String chosenDstore = availableDstores.get(random.nextInt(availableDstores.size()));
+        DstoreInfo dstoreInfo = dstores.get(chosenDstore);
+    
+        if (dstoreInfo == null) {
+            writer.println("ERROR_NOT_ENOUGH_DSTORES");
+            System.out.println("DEBUG: Dstore info not found for chosen Dstore: " + chosenDstore);
+            return;
+        }
+    
+        // Update the set of used Dstores for this client and file at the end of the load operation
+        Map<String, Set<String>> clientFilesToUsedDstores = usedDstoresMap.computeIfAbsent(clientAddress, k -> new ConcurrentHashMap<>());
+        Set<String> usedDstores = clientFilesToUsedDstores.computeIfAbsent(filename, k -> new HashSet<>());
+        usedDstores.add(chosenDstore);
+    
+        long fileSize = getFileSize(filename);
+        writer.println("LOAD_FROM " + dstoreInfo.getPort() + " " + fileSize);
+        System.out.println("DEBUG: LOAD_FROM command sent for " + filename + " from Dstore port " + dstoreInfo.getPort() + " with size " + fileSize);
+    }
+        
     private long getFileSize(String filename) {
-        // Example placeholder for actual file size logic
-        return 1024;
+        FileInfo fileInfo = fileIndex.get(filename);
+        if (fileInfo != null) {
+            return fileInfo.getFileSize();
+        }
+        return -1; // or throw an exception if the file is not found
     }
-    
+        
 
 ///////////////////////////////////////// REBALANCE /////////////////////////////////////////////////////////////////////////////
 
@@ -601,7 +614,7 @@ private void processLoadCommand(String[] commandParts, PrintWriter writer, Strin
         // Collect current file lists from all Dstores
         Map<String, List<String>> dstoreFileLists = collectDstoreFileLists();
 
-        // Convert List to Set for compatibility with existing code
+       
         Map<String, Set<String>> currentDistribution = new HashMap<>();
         dstoreFileLists.forEach((dstoreId, fileList) -> {
             currentDistribution.putIfAbsent(dstoreId, new HashSet<>(fileList));
@@ -631,7 +644,7 @@ private void processLoadCommand(String[] commandParts, PrintWriter writer, Strin
                     PrintWriter writer = new PrintWriter(dstoreInfo.getSocket().getOutputStream(), true);
                     BufferedReader reader = new BufferedReader(new InputStreamReader(dstoreInfo.getSocket().getInputStream()));
 
-                    // Set a timeout for socket read operations to avoid blocking indefinitely
+                   
                     dstoreInfo.getSocket().setSoTimeout(5000); 
 
                     writer.println("LIST");  // Send LIST command to Dstore
