@@ -13,7 +13,7 @@ CONTROLLER = Controller
 DSTORE = Dstore
 FILEINFO = FileInfo
 DSTOREINFO = DstoreInfo
-
+PAIR = Pair
 # Default target
 all: compile
 
@@ -24,6 +24,7 @@ compile: $(CONTROLLER).java $(DSTORE).java
 	$(JAVAC) $(SRC_DIR)/$(DSTORE).java
 	$(JAVAC) $(SRC_DIR)/$(DSTOREINFO).java
 	$(JAVAC) $(SRC_DIR)/$(FILEINFO).java
+	$(JAVAC) $(SRC_DIR)/$(PAIR).java
 
 # Run the Controller
 run-controller:

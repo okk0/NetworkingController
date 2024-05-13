@@ -1,7 +1,9 @@
 import java.io.*;
 import java.net.*;
 import java.nio.file.*;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.List;
 
 public class Dstore {
     private ServerSocket serverSocket;
@@ -11,11 +13,10 @@ public class Dstore {
     private final String controllerHost;
     private final int controllerPort;
     private final int port;
-    private final int timeout;
     private boolean running = true;
     private final String fileFolder;
+    private final int timeout;
     private static final int CLIENT_TIMEOUT_MS = 10000; // Example: 10 seconds
-    private static final int CONTROLLER_RECONNECT_DELAY_MS = 5000; // 5 seconds
 
     public Dstore(int port, String controllerHost, int controllerPort, int timeout, String fileFolder) {
         this.port = port;
@@ -103,65 +104,43 @@ public class Dstore {
         }
     }
     
-      
+/////////////////////////////////////////STORE AND LOAD ////////////////////////////////////////////////////////////////////////////
     
-    // Shared utility method to read and write file data
-    private void transferFileData(InputStream inputStream, OutputStream outputStream, int bufferSize) throws IOException {
-        byte[] buffer = new byte[bufferSize];
-        int bytesRead;
-        int totalBytesTransferred = 0;
-        while ((bytesRead = inputStream.read(buffer)) != -1) {
-            outputStream.write(buffer, 0, bytesRead);
-            totalBytesTransferred += bytesRead;
-            System.out.println("Transferred " + totalBytesTransferred + " bytes so far.");
-        }
-        outputStream.flush();
-        System.out.println("Total bytes transferred: " + totalBytesTransferred);
-    }
+   
 
     private void handleLoadDataCommand(String filename, Socket clientSocket) {
-        System.out.println("Loading file: " + filename);
-        File file = new File(fileFolder, filename);
-
-        // Additional debugging information
-        System.out.println("File path: " + file.getAbsolutePath());
-        System.out.println("File exists: " + file.exists());
-        System.out.println("Is a file: " + file.isFile());
-        System.out.println("File length: " + file.length());
-
-        if (!file.exists() || !file.isFile()) {
-            System.out.println("File not found or is not a file: " + filename);
-            try (PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true)) {
-                writer.println("ERROR_FILE_DOES_NOT_EXIST");
-            } catch (IOException e) {
-                System.out.println("Error writing error message to client: " + e.getMessage());
-            }
-            return;
-        }
-
-        // Set a socket read timeout
         try {
-            clientSocket.setSoTimeout(CLIENT_TIMEOUT_MS); // Replace CLIENT_TIMEOUT_MS with the appropriate timeout value
-            System.out.println("Socket timeout set to " + CLIENT_TIMEOUT_MS + " ms");
-        } catch (SocketException e) {
-            System.out.println("Failed to set socket timeout: " + e.getMessage());
-        }
+            // Construct the full file path
+            File file = new File(fileFolder + File.separator + filename);
 
-        // Transfer file data using the shared utility function
-        try (InputStream fileInputStream = new FileInputStream(file);
-            OutputStream clientOutputStream = clientSocket.getOutputStream()) {
-            System.out.println("Starting file transfer to client...");
-            transferFileData(fileInputStream, clientOutputStream, 1024); // Reduced buffer size to 1024 bytes
-            System.out.println("File successfully sent to client: " + filename);
-        } catch (IOException e) {
-            System.out.println("Error sending file to client: " + e.getMessage());
-            try (PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true)) {
-                writer.println("ERROR_SENDING_FILE");
-            } catch (IOException ex) {
-                System.out.println("Error writing error message to client: " + ex.getMessage());
+            // Check if the file exists
+            if (!file.exists()) {
+                System.err.println(clientSocket.getPort() + " in dstore " + port + " :File does not exist: " + filename);
+                clientSocket.close();
+                return;
+            }
+
+            // Read all bytes from the file
+            byte[] fileContent = Files.readAllBytes(file.toPath());
+
+            // Get the output stream of the client socket
+            OutputStream out = clientSocket.getOutputStream();
+
+            // Write the file content to the client's output stream
+            out.write(fileContent);
+            out.flush();
+        } catch (Exception e) {
+            System.err.println(clientSocket.getPort() + " in dstore " + port + " :Error loading file: " + e.getMessage());
+
+            // Attempt to close the client socket
+            try {
+                clientSocket.close();
+            } catch (IOException e1) {
+                System.err.println(clientSocket.getPort() + " in dstore " + port + " :Error closing client socket: " + e1.getMessage());
             }
         }
     }
+
 
 
     private void handleStoreCommand(String[] commandParts, PrintWriter writer, Socket clientSocket) {
@@ -221,19 +200,94 @@ public class Dstore {
         }
     }
 
-        
-    
-
     private void notifyControllerStoreAck(String filename) {
         if (controllerOut != null) {
             System.out.println("STORE_ACK");
             controllerOut.println("STORE_ACK " + filename);
         }
     }
-
+///////////////////////////////// REBALANCE /////////////////////////////////////////////////////////////////////////////////////
     
+private void handleRebalanceCommand(String[] commandParts) {
+        System.out.println("REBALANCE");
+        int numFilesToSend = Integer.parseInt(commandParts[1]);
+        int currentIndex = 2;
 
-    private void clearLocalData() {
+        List<Pair<String, List<String>>> filesToSend = new ArrayList<>();
+        for (int i = 0; i < numFilesToSend; i++) {
+            String filename = commandParts[currentIndex++];
+            int numDstores = Integer.parseInt(commandParts[currentIndex++]);
+            List<String> targetDstores = new ArrayList<>();
+            for (int j = 0; j < numDstores; j++) {
+                targetDstores.add(commandParts[currentIndex++]);
+            }
+            filesToSend.add(new Pair<>(filename, targetDstores));
+        }
+
+        int numFilesToRemove = Integer.parseInt(commandParts[currentIndex++]);
+        List<String> filesToRemove = new ArrayList<>();
+        for (int i = 0; i < numFilesToRemove; i++) {
+            filesToRemove.add(commandParts[currentIndex++]);
+        }
+
+        // Send files to target Dstores
+        for (Pair<String, List<String>> fileSend : filesToSend) {
+            String filename = fileSend.getFirst();
+            List<String> targetDstores = fileSend.getSecond();
+
+            for (String dstore : targetDstores) {
+                sendFileToDstore(filename, dstore);
+            }
+        }
+
+        // Remove files as requested
+        for (String filename : filesToRemove) {
+            File file = new File(fileFolder, filename);
+            if (file.exists()) {
+                file.delete();
+                System.out.println("Removed file: " + filename);
+            }
+        }
+
+        // Notify controller of rebalance completion
+        notifyControllerRebalanceComplete();
+    }
+
+    private void sendFileToDstore(String filename, String dstoreAddress) {
+        try (Socket dstoreSocket = new Socket(dstoreAddress.split(":")[0], Integer.parseInt(dstoreAddress.split(":")[1]));
+            PrintWriter writer = new PrintWriter(dstoreSocket.getOutputStream(), true);
+            BufferedReader reader = new BufferedReader(new InputStreamReader(dstoreSocket.getInputStream()));
+            InputStream fileInputStream = new FileInputStream(new File(fileFolder, filename));
+            OutputStream dstoreOutputStream = dstoreSocket.getOutputStream()) {
+
+            long fileSize = new File(fileFolder, filename).length();
+            writer.println("REBALANCE_STORE " + filename + " " + fileSize);
+
+            // Await acknowledgment
+            String response = reader.readLine();
+            if (response.equals("ACK")) {
+                byte[] buffer = new byte[4096];
+                int bytesRead;
+                while ((bytesRead = fileInputStream.read(buffer)) != -1) {
+                    dstoreOutputStream.write(buffer, 0, bytesRead);
+                }
+                System.out.println("Sent file " + filename + " to Dstore " + dstoreAddress);
+            }
+        } catch (IOException e) {
+            System.out.println("Error sending file to Dstore: " + e.getMessage());
+        }
+    }
+
+    private void notifyControllerRebalanceComplete() {
+        if (controllerOut != null) {
+            controllerOut.println("REBALANCE_COMPLETE");
+            System.out.println("Rebalance operation completed.");
+        }
+    }
+
+////////////////////////////// HANDLE COMMANDS //////////////////////////////////////////////////////////////////////////////////////
+    
+private void clearLocalData() {
         try {
             Path directory = Paths.get(fileFolder);
             if (!Files.exists(directory)) {
@@ -278,9 +332,8 @@ public class Dstore {
                     break;
                 }
     
-                // Split the command to identify its parts
                 String[] parts = command.split(" ");
-                if (parts.length < 2) {
+                if (parts.length < 1) {
                     System.out.println("Malformed command from controller: " + command);
                     continue;
                 }
@@ -288,7 +341,17 @@ public class Dstore {
                 // Process the command based on the type
                 switch (parts[0]) {
                     case "REMOVE":
-                        handleRemoveCommand(parts[1], controllerOut); // Pass the filename and controller writer
+                        if (parts.length < 2) {
+                            System.out.println("REMOVE command missing filename.");
+                        } else {
+                            handleRemoveCommand(parts[1], controllerOut);
+                        }
+                        break;
+                    case "REBALANCE":
+                        handleRebalanceCommand(parts);
+                        break;
+                    case "LIST":
+                        handleListCommand();
                         break;
                     default:
                         System.out.println("Unknown command from controller: " + command);
@@ -303,6 +366,22 @@ public class Dstore {
         }
         System.out.println("Stopped listening to the controller");
     }
+    
+    private void handleListCommand() {
+        File folder = new File(fileFolder);
+        File[] listOfFiles = folder.listFiles();
+        StringBuilder fileListBuilder = new StringBuilder("LIST");
+        if (listOfFiles != null) {
+            for (File file : listOfFiles) {
+                if (file.isFile()) {
+                    fileListBuilder.append(" ").append(file.getName());
+                }
+            }
+        }
+        controllerOut.println(fileListBuilder.toString());
+        System.out.println("Sent file list to controller.");
+    }
+    
     
     private void handleRemoveCommand(String filename, PrintWriter controllerWriter) {
         File file = new File(fileFolder, filename);
@@ -321,7 +400,8 @@ public class Dstore {
         }
     }
     
-    
+/////////////////////////////////// MAIN /////////////////////////////////////////////////////////////////////////////////////////////////
+
     // Other methods remain the same...
 
     public void stop() {

@@ -1,3 +1,35 @@
 Cleared local data in existing directory successfully.
 Sent JOIN message with port: 12347
 Dstore listening on port: 12347
+Accepted client connection from: /127.0.0.1:50814
+Connection established with client: /127.0.0.1:50814
+Received command: STORE file1.txt 13
+Preparing to store file: file1.txt with size: 13
+Sent ACK to client.
+Received 13 bytes so far.
+STORE_ACK
+File stored successfully: file1.txt
+STORE
+Client disconnected: /127.0.0.1:50814
+Accepted client connection from: /127.0.0.1:50818
+Connection established with client: /127.0.0.1:50818
+Received command: LOAD_DATA file1.txt
+LOAD DATA
+Client disconnected: /127.0.0.1:50818
+Accepted client connection from: /127.0.0.1:50825
+Connection established with client: /127.0.0.1:50825
+Received command: LOAD_DATA file1.txt
+LOAD DATA
+Client disconnected: /127.0.0.1:50825
+Accepted client connection from: /127.0.0.1:50827
+Connection established with client: /127.0.0.1:50827
+Received command: LOAD_DATA file1.txt
+LOAD DATA
+Client disconnected: /127.0.0.1:50827
+Accepted client connection from: /127.0.0.1:50830
+Connection established with client: /127.0.0.1:50830
+Received command: LOAD_DATA file1.txt
+LOAD DATA
+Client disconnected: /127.0.0.1:50830
+Processing REMOVE command for file: file1.txt
+File successfully removed: file1.txt

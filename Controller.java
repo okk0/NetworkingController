@@ -1,6 +1,8 @@
 import java.io.*;
 import java.net.*;
 import java.util.concurrent.*;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -11,6 +13,8 @@ public class Controller {
     private int timeout; // Timeout in milliseconds
     private int rebalancePeriod; // Rebalance period in seconds
     private ServerSocket serverSocket;
+    private ScheduledExecutorService scheduler;
+
     private volatile boolean running = true;
     
     private ConcurrentHashMap<String, FileInfo> fileIndex = new ConcurrentHashMap<>();
@@ -20,6 +24,7 @@ public class Controller {
     private Map<String, String> removefileToClientAddress = new ConcurrentHashMap<>();
     private Map<String, Map<String, String>> clientToLastDstoreMap = new ConcurrentHashMap<>();
     private ConcurrentMap<String, ConcurrentSkipListSet<String>> pendingRemoveAcks = new ConcurrentHashMap<>();
+   
 
     public Controller(int port, int replicationFactor, int timeout, int rebalancePeriod) {
         this.port = port;
@@ -34,8 +39,10 @@ public class Controller {
         serverSocket = new ServerSocket(port);
         System.out.println("Controller started on port " + port + " with replication factor " + replicationFactor + ", timeout " + timeout + " ms, rebalance period " + rebalancePeriod + " s.");
 
+        //scheduler = Executors.newScheduledThreadPool(1);
+        //scheduler.scheduleAtFixedRate(this::rebalance, rebalancePeriod, rebalancePeriod, TimeUnit.SECONDS);
+
         new Thread(this::acceptConnections).start();
-        new Thread(this::rebalance).start();
     }
 
     private void acceptConnections() {
@@ -212,46 +219,16 @@ public class Controller {
     
     /////////////////////////////////REMOVE////////////////////////////////////////////////////////////////
 
-    private void handleRemoveAck(String filename, String dstoreAddress) {
-        ConcurrentSkipListSet<String> acks = pendingRemoveAcks.get(filename);
-        if (acks != null) {
-            acks.remove(dstoreAddress);
-            System.out.println("Received REMOVE_ACK for file: " + filename + " from " + dstoreAddress);
-    
-            // Check if all acknowledgments have been received
-            if (acks.isEmpty()) {
-                // Remove the file from the index and clear pending acks
-                fileIndex.remove(filename);
-                pendingRemoveAcks.remove(filename);
-    
-                // Find the client associated with this file removal
-                String clientAddress = removefileToClientAddress.get(filename);
-                if (clientAddress != null) {
-                    Socket clientSocket = clientConnections.get(clientAddress);
-                    if (clientSocket != null && !clientSocket.isClosed()) {
-                        try {
-                            PrintWriter clientWriter = new PrintWriter(clientSocket.getOutputStream(), true);
-                            clientWriter.println("REMOVE_COMPLETE");
-                            System.out.println("Remove operation completed for file " + filename);
-                        } catch (IOException e) {
-                            System.out.println("Error sending REMOVE_COMPLETE to client: " + e.getMessage());
-                        }
-                    } else {
-                        System.out.println("Client socket unavailable or already closed: " + clientAddress);
-                    }
-                }
-    
-                // Cleanup the client-to-file mapping after completion
-                removefileToClientAddress.remove(filename);
-            }
-        } else {
-            System.out.println("Received REMOVE_ACK for non-existent file: " + filename);
-        }
-    }
-    
     private void handleRemoveCommand(String[] commandParts, PrintWriter writer, String clientAddress) {
         String filename = commandParts[1];
         System.out.println("Initiating remove operation for file: " + filename);
+    
+        // Check if enough Dstores have joined
+        if (dstores.size() < replicationFactor) {
+            writer.println("ERROR_NOT_ENOUGH_DSTORES");
+            System.out.println("Not enough Dstores available for removal operation.");
+            return;
+        }
     
         // Check if the file exists in the index
         FileInfo fileInfo = fileIndex.get(filename);
@@ -300,8 +277,56 @@ public class Controller {
                 System.out.println("Error: Dstore socket is null for " + dstore);
             }
         }
+    
+        // Start a timer to detect timeouts
+        new Timer().schedule(new TimerTask() {
+            @Override
+            public void run() {
+                ConcurrentSkipListSet<String> remainingAcks = pendingRemoveAcks.get(filename);
+                if (remainingAcks != null && !remainingAcks.isEmpty()) {
+                    System.out.println("Timeout occurred waiting for REMOVE_ACKs. Remaining: " + remainingAcks);
+                    // The state will remain "remove in progress"
+                    // Future rebalances should ensure the file is not stored on any Dstore
+                }
+            }
+        }, timeout);
     }
     
+    private void handleRemoveAck(String filename, String dstoreAddress) {
+        // Retrieve the set of expected acks for this file
+        ConcurrentSkipListSet<String> acks = pendingRemoveAcks.get(filename);
+    
+        if (acks != null) {
+            acks.remove(dstoreAddress);
+            System.out.println("Received REMOVE_ACK for file: " + filename + " from " + dstoreAddress);
+    
+            // Check if all acknowledgments have been received
+            if (acks.isEmpty()) {
+                // Remove the file from the index and clear pending acks
+                fileIndex.remove(filename);
+                pendingRemoveAcks.remove(filename);
+    
+                // Find the client associated with this file removal
+                String clientAddress = removefileToClientAddress.remove(filename);
+                if (clientAddress != null) {
+                    Socket clientSocket = clientConnections.get(clientAddress);
+                    if (clientSocket != null && !clientSocket.isClosed()) {
+                        try {
+                            PrintWriter clientWriter = new PrintWriter(clientSocket.getOutputStream(), true);
+                            clientWriter.println("REMOVE_COMPLETE");
+                            System.out.println("Remove operation completed for file " + filename);
+                        } catch (IOException e) {
+                            System.out.println("Error sending REMOVE_COMPLETE to client: " + e.getMessage());
+                        }
+                    } else {
+                        System.out.println("Client socket unavailable or already closed: " + clientAddress);
+                    }
+                }
+            }
+        } else {
+            System.out.println("Received REMOVE_ACK for non-existent file: " + filename);
+        }
+    }
     
     
     
@@ -355,6 +380,10 @@ public class Controller {
             writer.println("LIST " + fileList);
         }
     }
+
+    
+    
+    
     ////////////////////////////////// STORE /////////////////////////////////////////////////////////////////////////////////
 
     
@@ -559,14 +588,209 @@ private void processLoadCommand(String[] commandParts, PrintWriter writer, Strin
 
 ///////////////////////////////////////// REBALANCE /////////////////////////////////////////////////////////////////////////////
 
+
+
     private void rebalance() {
-        // Implement rebalancing logic here, to be run periodically
+        if (dstores.size() < replicationFactor) {
+            System.out.println("Insufficient number of Dstores for rebalancing. Required: " + replicationFactor + ", Available: " + dstores.size());
+            return;
+        }
+
+        System.out.println("Starting rebalance operation...");
+
+        // Collect current file lists from all Dstores
+        Map<String, List<String>> dstoreFileLists = collectDstoreFileLists();
+
+        // Convert List to Set for compatibility with existing code
+        Map<String, Set<String>> currentDistribution = new HashMap<>();
+        dstoreFileLists.forEach((dstoreId, fileList) -> {
+            currentDistribution.putIfAbsent(dstoreId, new HashSet<>(fileList));
+        });
+
+        // Create a rebalance plan based on the current distribution
+        Map<String, Pair<List<Pair<String, List<String>>>, List<String>>> rebalancePlan = createRebalancePlan(dstoreFileLists);
+
+        // Send rebalance commands to Dstores as per the plan
+        sendRebalanceCommands(rebalancePlan);
+
+        System.out.println("Rebalance operation completed.");
     }
+        
+
+    private Map<String, List<String>> collectDstoreFileLists() {
+        Map<String, List<String>> dstoreFileLists = new ConcurrentHashMap<>();
+        CountDownLatch latch = new CountDownLatch(dstores.size());
+
+        System.out.println("Collecting file lists from Dstores...");
+        dstores.forEach((dstoreId, dstoreInfo) -> {
+            new Thread(() -> {
+                Lock lock = new ReentrantLock();
+                lock.lock();
+                try {
+                    // Ensure each thread has its own socket communication objects
+                    PrintWriter writer = new PrintWriter(dstoreInfo.getSocket().getOutputStream(), true);
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(dstoreInfo.getSocket().getInputStream()));
+
+                    // Set a timeout for socket read operations to avoid blocking indefinitely
+                    dstoreInfo.getSocket().setSoTimeout(5000); 
+
+                    writer.println("LIST");  // Send LIST command to Dstore
+                    String response = reader.readLine();
+                    if (response != null && response.startsWith("LIST")) {
+                        List<String> fileList = Arrays.asList(response.split(" ")).subList(1, response.split(" ").length);
+                        dstoreFileLists.put(dstoreId, fileList);  // Store received file list
+                        System.out.println("Received file list from Dstore " + dstoreId + ": " + fileList);
+                    } else {
+                        System.out.println("Failed to get file list from Dstore " + dstoreId + ", response: " + response);
+                    }
+                } catch (SocketTimeoutException e) {
+                    System.out.println("Timeout while waiting for LIST response from Dstore " + dstoreId);
+                } catch (IOException e) {
+                    System.out.println("Error listing files in Dstore " + dstoreId + ": " + e.getMessage());
+                } finally {
+                    lock.unlock();
+                    latch.countDown();
+                }
+            }).start();
+        });
+
+        try {
+            latch.await();  // Wait for all threads to finish
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.out.println("Thread interrupted while collecting file lists: " + e.getMessage());
+        }
+
+        return dstoreFileLists;
+    }
+        
+    
+    
+
+    private Map<String, Pair<List<Pair<String, List<String>>>, List<String>>> createRebalancePlan(Map<String, List<String>> dstoreFileLists) {
+        Map<String, Pair<List<Pair<String, List<String>>>, List<String>>> rebalancePlan = new ConcurrentHashMap<>();
+        System.out.println("Creating rebalance plan...");
+    
+        int totalFiles = fileIndex.size();
+        int idealMinFiles = (int) Math.floor((double) replicationFactor * totalFiles / dstores.size());
+        int idealMaxFiles = (int) Math.ceil((double) replicationFactor * totalFiles / dstores.size());
+    
+        System.out.println("Desired file distribution per Dstore: min=" + idealMinFiles + ", max=" + idealMaxFiles);
+    
+        for (String dstoreId : dstores.keySet()) {
+            rebalancePlan.put(dstoreId, new Pair<>(new ArrayList<>(), new ArrayList<>()));
+        }
+        // Identify Dstores holding too few/many files and mark files for sending or removal
+        Map<String, Set<String>> dstoreFiles = new HashMap<>();
+        for (Map.Entry<String, List<String>> entry : dstoreFileLists.entrySet()) {
+            dstoreFiles.put(entry.getKey(), new HashSet<>(entry.getValue()));
+        }
+    
+        // Process each file in the index to ensure replication across Dstores
+        for (Map.Entry<String, FileInfo> fileEntry : fileIndex.entrySet()) {
+            String filename = fileEntry.getKey();
+            FileInfo fileInfo = fileEntry.getValue();
+            Set<String> dstoreHoldingFile = new HashSet<>(fileInfo.dstores);
+    
+            // If the file needs more replicas
+            if (dstoreHoldingFile.size() < replicationFactor) {
+                List<String> dstoresToReplicate = new ArrayList<>();
+                for (String dstoreId : dstores.keySet()) {
+                    if (!dstoreHoldingFile.contains(dstoreId) && dstoreFiles.get(dstoreId).size() < idealMaxFiles) {
+                        dstoresToReplicate.add(dstoreId);
+                        dstoreHoldingFile.add(dstoreId);
+                        dstoreFiles.get(dstoreId).add(filename);
+    
+                        if (dstoresToReplicate.size() >= (replicationFactor - fileInfo.dstores.size())) break;
+                    }
+                }
+    
+                // Mark the file for sending to new Dstores
+                for (String existingDstore : fileInfo.dstores) {
+                    Pair<List<Pair<String, List<String>>>, List<String>> dstorePlan = rebalancePlan.get(existingDstore);
+                    dstorePlan.getFirst().add(new Pair<>(filename, dstoresToReplicate));
+                }
+            }
+    
+            // If the file is over-replicated, mark excess copies for removal
+            if (dstoreHoldingFile.size() > replicationFactor) {
+                List<String> excessDstores = new ArrayList<>(dstoreHoldingFile);
+                excessDstores = excessDstores.subList(replicationFactor, excessDstores.size());
+    
+                for (String dstoreId : excessDstores) {
+                    Pair<List<Pair<String, List<String>>>, List<String>> dstorePlan = rebalancePlan.get(dstoreId);
+                    dstorePlan.getSecond().add(filename);
+                    dstoreFiles.get(dstoreId).remove(filename);
+                }
+            }
+        }
+    
+        // Mark unindexed files for removal in each Dstore
+        for (Map.Entry<String, Set<String>> dstoreEntry : dstoreFiles.entrySet()) {
+            String dstoreId = dstoreEntry.getKey();
+            Set<String> currentFiles = dstoreEntry.getValue();
+    
+            Pair<List<Pair<String, List<String>>>, List<String>> dstorePlan = rebalancePlan.get(dstoreId);
+            List<String> filesToRemove = dstorePlan.getSecond();
+    
+            for (String storedFile : currentFiles) {
+                if (!fileIndex.containsKey(storedFile)) {
+                    filesToRemove.add(storedFile);
+                }
+            }
+        }
+    
+        return rebalancePlan;
+    }
+    
+
+    private void sendRebalanceCommands(Map<String, Pair<List<Pair<String, List<String>>>, List<String>>> rebalancePlan) {
+        for (Map.Entry<String, Pair<List<Pair<String, List<String>>>, List<String>>> entry : rebalancePlan.entrySet()) {
+            String dstoreId = entry.getKey();
+            DstoreInfo dstoreInfo = dstores.get(dstoreId);
+            Socket dstoreSocket = dstoreInfo.getSocket();
+    
+            Pair<List<Pair<String, List<String>>>, List<String>> dstorePlan = entry.getValue();
+            List<Pair<String, List<String>>> filesToSend = dstorePlan.getFirst();
+            List<String> filesToRemove = dstorePlan.getSecond();
+    
+            StringBuilder rebalanceCommand = new StringBuilder("REBALANCE ");
+    
+            // Format the `files_to_send` part
+            rebalanceCommand.append(filesToSend.size()).append(" ");
+            for (Pair<String, List<String>> file : filesToSend) {
+                String filename = file.getFirst();
+                List<String> dstores = file.getSecond();
+                rebalanceCommand.append(filename).append(" ").append(dstores.size()).append(" ");
+                rebalanceCommand.append(String.join(" ", dstores)).append(" ");
+            }
+    
+            // Format the `files_to_remove` part
+            rebalanceCommand.append(filesToRemove.size()).append(" ");
+            for (String file : filesToRemove) {
+                rebalanceCommand.append(file).append(" ");
+            }
+    
+            // Send the rebalance command to the Dstore
+            try {
+                PrintWriter writer = new PrintWriter(dstoreSocket.getOutputStream(), true);
+                writer.println(rebalanceCommand.toString().trim());
+                System.out.println("Sent REBALANCE command to Dstore " + dstoreId + ": " + rebalanceCommand);
+            } catch (IOException e) {
+                System.out.println("Error sending REBALANCE command to Dstore " + dstoreId + ": " + e.getMessage());
+            }
+        }
+    }
+    
+//////////////////////////////// MAIN ///////////////////////////////////////////////////////////////////////////////////////////////////
 
     public void stop() throws IOException {
         running = false;
         if (serverSocket != null) {
             serverSocket.close();
+        }
+        if (scheduler != null) {
+            scheduler.shutdown();
         }
     }
 
